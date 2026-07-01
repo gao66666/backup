@@ -9,7 +9,7 @@ CREATE TABLE nodes (
     title VARCHAR(500) NOT NULL DEFAULT 'Untitled',                   -- 节点标题
     content JSONB,                                                    -- 节点内容，按 type 存储不同结构
     properties JSONB DEFAULT '{}',                                    -- 扩展属性（is_pinned, icon, color 等）
-    description TEXT,                                                -- 描述
+    caption TEXT,                                                   -- 描述
     sort_order DOUBLE PRECISION DEFAULT 0,                            -- 排序权重，浮点数支持拖拽排序
     is_deleted BOOLEAN DEFAULT FALSE,                                 -- 软删除标记
     deleted_at TIMESTAMPTZ,                                           -- 删除时间

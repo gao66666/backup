@@ -42,8 +42,8 @@ public class Node {
     @Column(name = "properties", columnDefinition = "jsonb")
     private String properties = "{}";
 
-    @Column(name = "description")
-    private String description;
+    @Column(name = "caption")
+    private String caption;
 
     @Column(name = "sort_order")
     private Double sortOrder = 0.0;
@@ -87,8 +87,8 @@ public class Node {
     public String getProperties() { return properties; }
     public void setProperties(String properties) { this.properties = properties; }
 
-    public String getDescription() { return description; }
-    public void setDescription(String description) { this.description = description; }
+    public String getCaption() { return caption; }
+    public void setCaption(String caption) { this.caption = caption; }
 
     public Double getSortOrder() { return sortOrder; }
     public void setSortOrder(Double sortOrder) { this.sortOrder = sortOrder; }

@@ -24,7 +24,7 @@ public class NodeRepository {
     }
 
     public Record insert(UUID spaceId, UUID parentId, String type, String title,
-                        String content, String properties, String description,
+                        String content, String properties, String caption,
                         Double sortOrder, UUID createdBy) {
         UUID id = UUID.randomUUID();
         OffsetDateTime now = OffsetDateTime.now();
@@ -37,7 +37,7 @@ public class NodeRepository {
                         field("title", String.class),
                         field("content", SQLDataType.JSONB.nullable()),
                         field("properties", SQLDataType.JSONB.nullable()),
-                        field("description", String.class),
+                        field("caption", String.class),
                         field("sort_order", Double.class),
                         field("is_deleted", Boolean.class),
                         field("created_by", UUID.class),
@@ -46,7 +46,7 @@ public class NodeRepository {
                 .values(id, spaceId, parentId, type, title,
                         cast(content != null ? content : "{}", SQLDataType.JSONB),
                         cast(properties != null ? properties : "{}", SQLDataType.JSONB),
-                        description, sortOrder != null ? sortOrder : 0.0,
+                        caption, sortOrder != null ? sortOrder : 0.0,
                         false, createdBy, now, now)
                 .execute();
 
@@ -67,12 +67,12 @@ public class NodeRepository {
     }
 
     public int update(UUID id, String title, String content, String properties,
-                      String description, Double sortOrder) {
+                      String caption, Double sortOrder) {
         return db.update(table("nodes"))
                 .set(field("title", String.class), title)
                 .set(field("content", SQLDataType.JSONB), content != null ? cast(content, SQLDataType.JSONB) : null)
                 .set(field("properties", SQLDataType.JSONB), properties != null ? cast(properties, SQLDataType.JSONB) : null)
-                .set(field("description", String.class), description)
+                .set(field("caption", String.class), caption)
                 .set(field("sort_order", Double.class), sortOrder)
                 .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
                 .where(field("id", UUID.class).eq(id))

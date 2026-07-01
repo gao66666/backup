@@ -1,6 +1,6 @@
 package com.workspace.controller;
 
-import com.workspace.service.PermissionService.ForbiddenException;
+import com.workspace.service.RoleContext;
 import com.workspace.service.SpaceService;
 import com.workspace.util.AuthService;
 import org.springframework.http.ResponseEntity;
@@ -61,10 +61,5 @@ public class SpaceController {
             return ResponseEntity.notFound().build();
         }
         return ResponseEntity.ok().build();
-    }
-
-    @ExceptionHandler(ForbiddenException.class)
-    public ResponseEntity<Map<String, String>> handleForbidden(ForbiddenException e) {
-        return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
     }
 }

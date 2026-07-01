@@ -1,7 +1,7 @@
 package com.workspace.controller;
 
 import com.workspace.service.NodeService;
-import com.workspace.service.PermissionService.ForbiddenException;
+import com.workspace.service.RoleContext;
 import com.workspace.util.AuthService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -24,29 +24,30 @@ public class NodeController {
 
     @PostMapping
     public ResponseEntity<?> create(@RequestBody Map<String, Object> body) {
-        UUID spaceId = UUID.fromString((String) body.get("spaceId"));
+        UUID spaceId = RoleContext.current().spaceId();
         UUID parentId = body.get("parentId") != null ? UUID.fromString((String) body.get("parentId")) : null;
         String type = (String) body.get("type");
         String title = (String) body.get("title");
         String content = (String) body.get("content");
         String properties = (String) body.get("properties");
-        String description = (String) body.get("description");
+        String caption = (String) body.get("caption");
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
         UUID createdBy = authService.getCurrentUserId();
 
         return ResponseEntity.ok(nodeService.create(spaceId, parentId, type, title,
-                content, properties, description, sortOrder, createdBy));
+                content, properties, caption, sortOrder, createdBy));
     }
 
     @GetMapping
     public ResponseEntity<List<Map<String, Object>>> getBySpaceIdAndParentId(
-            @RequestParam UUID spaceId,
             @RequestParam(required = false) UUID parentId) {
+        UUID spaceId = RoleContext.current().spaceId();
         return ResponseEntity.ok(nodeService.getBySpaceIdAndParentId(spaceId, parentId));
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<?> getById(@PathVariable UUID id, @RequestParam UUID spaceId) {
+    public ResponseEntity<?> getById(@PathVariable UUID id) {
+        UUID spaceId = RoleContext.current().spaceId();
         Map<String, Object> result = nodeService.getById(spaceId, id);
         if (result == null) {
             return ResponseEntity.notFound().build();
@@ -55,14 +56,15 @@ public class NodeController {
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<?> update(@PathVariable UUID id, @RequestParam UUID spaceId, @RequestBody Map<String, Object> body) {
+    public ResponseEntity<?> update(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+        UUID spaceId = RoleContext.current().spaceId();
         String title = (String) body.get("title");
         String content = (String) body.get("content");
         String properties = (String) body.get("properties");
-        String description = (String) body.get("description");
+        String caption = (String) body.get("caption");
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
 
-        boolean updated = nodeService.update(spaceId, id, title, content, properties, description, sortOrder);
+        boolean updated = nodeService.update(spaceId, id, title, content, properties, caption, sortOrder);
         if (!updated) {
             return ResponseEntity.notFound().build();
         }
@@ -70,7 +72,8 @@ public class NodeController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<?> delete(@PathVariable UUID id, @RequestParam UUID spaceId) {
+    public ResponseEntity<?> delete(@PathVariable UUID id) {
+        UUID spaceId = RoleContext.current().spaceId();
         boolean deleted = nodeService.delete(spaceId, id);
         if (!deleted) {
             return ResponseEntity.notFound().build();
@@ -79,7 +82,8 @@ public class NodeController {
     }
 
     @PatchMapping("/{id}/move")
-    public ResponseEntity<?> move(@PathVariable UUID id, @RequestParam UUID spaceId, @RequestBody Map<String, Object> body) {
+    public ResponseEntity<?> move(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+        UUID spaceId = RoleContext.current().spaceId();
         UUID newParentId = body.get("newParentId") != null ? UUID.fromString((String) body.get("newParentId")) : null;
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
         boolean moved = nodeService.move(spaceId, id, newParentId, sortOrder);
@@ -87,10 +91,5 @@ public class NodeController {
             return ResponseEntity.notFound().build();
         }
         return ResponseEntity.ok().build();
-    }
-
-    @ExceptionHandler(ForbiddenException.class)
-    public ResponseEntity<Map<String, String>> handleForbidden(ForbiddenException e) {
-        return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
     }
 }

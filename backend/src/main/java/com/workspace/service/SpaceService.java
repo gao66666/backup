@@ -11,12 +11,10 @@ import java.util.UUID;
 public class SpaceService {
 
     private final SpaceRepository spaceRepository;
-    private final PermissionService permissionService;
     private final AuditService auditService;
 
-    public SpaceService(SpaceRepository spaceRepository, PermissionService permissionService, AuditService auditService) {
+    public SpaceService(SpaceRepository spaceRepository, AuditService auditService) {
         this.spaceRepository = spaceRepository;
-        this.permissionService = permissionService;
         this.auditService = auditService;
     }
 
@@ -44,7 +42,7 @@ public class SpaceService {
     }
 
     public boolean update(UUID id, String name) {
-        permissionService.checkCanEdit(id);
+        RoleContext.requireAtLeast(Role.ADMIN);
         boolean updated = spaceRepository.update(id, name) > 0;
         if (updated) {
             auditService.log("space.update", "space", id,
@@ -54,7 +52,7 @@ public class SpaceService {
     }
 
     public boolean delete(UUID id) {
-        permissionService.checkCanDeleteSpace(id);
+        RoleContext.requireAtLeast(Role.OWNER);
         boolean deleted = spaceRepository.deleteById(id) > 0;
         if (deleted) {
             auditService.log("space.delete", "space", id,

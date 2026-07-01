@@ -11,18 +11,16 @@ import java.util.UUID;
 public class SpaceMemberService {
 
     private final SpaceMemberRepository spaceMemberRepository;
-    private final PermissionService permissionService;
     private final AuditService auditService;
 
     public SpaceMemberService(SpaceMemberRepository spaceMemberRepository,
-                             PermissionService permissionService, AuditService auditService) {
+                             AuditService auditService) {
         this.spaceMemberRepository = spaceMemberRepository;
-        this.permissionService = permissionService;
         this.auditService = auditService;
     }
 
     public Map<String, Object> create(UUID spaceId, UUID userId, String role) {
-        permissionService.checkCanManageMember(spaceId);
+        RoleContext.requireAtLeast(Role.ADMIN);
         Record record = spaceMemberRepository.insert(spaceId, userId, role);
         Map<String, Object> result = record.intoMap();
         auditService.log("member.add", "member", (UUID) result.get("id"),
@@ -43,19 +41,19 @@ public class SpaceMemberService {
     }
 
     public java.util.List<Map<String, Object>> getBySpaceId(UUID spaceId) {
-        permissionService.checkCanView(spaceId);
+        RoleContext.requireAtLeast(Role.VIEWER);
         return spaceMemberRepository.findBySpaceId(spaceId).stream()
                 .map(Record::intoMap)
                 .toList();
     }
 
     public boolean update(UUID id, String role) {
+        RoleContext.requireAtLeast(Role.ADMIN);
         // 先查现有成员信息
         Record existing = spaceMemberRepository.findById(id).orElse(null);
         if (existing == null) return false;
         UUID spaceId = existing.get(field("space_id", UUID.class));
         UUID targetUserId = existing.get(field("user_id", UUID.class));
-        permissionService.checkCanManageMember(spaceId, targetUserId);
         boolean updated = spaceMemberRepository.update(id, role) > 0;
         if (updated) {
             auditService.log("member.update", "member", id,
@@ -65,11 +63,11 @@ public class SpaceMemberService {
     }
 
     public boolean delete(UUID id) {
+        RoleContext.requireAtLeast(Role.ADMIN);
         Record existing = spaceMemberRepository.findById(id).orElse(null);
         if (existing == null) return false;
         UUID spaceId = existing.get(field("space_id", UUID.class));
         UUID targetUserId = existing.get(field("user_id", UUID.class));
-        permissionService.checkCanManageMember(spaceId, targetUserId);
         boolean deleted = spaceMemberRepository.deleteById(id) > 0;
         if (deleted) {
             auditService.log("member.remove", "member", id,

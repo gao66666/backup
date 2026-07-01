@@ -12,21 +12,19 @@ import java.util.UUID;
 public class NodeService {
 
     private final NodeRepository nodeRepository;
-    private final PermissionService permissionService;
     private final AuditService auditService;
 
-    public NodeService(NodeRepository nodeRepository, PermissionService permissionService, AuditService auditService) {
+    public NodeService(NodeRepository nodeRepository, AuditService auditService) {
         this.nodeRepository = nodeRepository;
-        this.permissionService = permissionService;
         this.auditService = auditService;
     }
 
     public Map<String, Object> create(UUID spaceId, UUID parentId, String type, String title,
-                                     String content, String properties, String description,
+                                     String content, String properties, String caption,
                                      Double sortOrder, UUID createdBy) {
-        permissionService.checkCanEdit(spaceId);
+        RoleContext.requireAtLeast(Role.EDITOR);
         Record record = nodeRepository.insert(spaceId, parentId, type, title,
-                content, properties, description, sortOrder, createdBy);
+                content, properties, caption, sortOrder, createdBy);
         Map<String, Object> result = toMap(record);
         auditService.log("node.create", "node", (UUID) result.get("id"),
                 "{\"spaceId\":\"" + spaceId + "\",\"type\":\"" + type + "\"}");
@@ -34,30 +32,31 @@ public class NodeService {
     }
 
     public Map<String, Object> getById(UUID spaceId, UUID id) {
-        permissionService.checkCanView(spaceId);
+        RoleContext.requireAtLeast(Role.VIEWER);
         return nodeRepository.findById(id)
                 .map(this::toMap)
                 .orElse(null);
     }
 
     public java.util.List<Map<String, Object>> getAll() {
+        RoleContext.requireAtLeast(Role.VIEWER);
         return nodeRepository.findAll().stream()
                 .map(this::toMap)
                 .toList();
     }
 
     public java.util.List<Map<String, Object>> getBySpaceIdAndParentId(UUID spaceId, UUID parentId) {
-        permissionService.checkCanView(spaceId);
+        RoleContext.requireAtLeast(Role.VIEWER);
         return nodeRepository.findBySpaceIdAndParentId(spaceId, parentId).stream()
                 .map(this::toMap)
                 .toList();
     }
 
     public boolean update(UUID spaceId, UUID id, String title, String content, String properties,
-                         String description, Double sortOrder) {
-        permissionService.checkCanEdit(spaceId);
+                         String caption, Double sortOrder) {
+        RoleContext.requireAtLeast(Role.EDITOR);
         boolean updated = nodeRepository.update(id, title, content, properties,
-                description, sortOrder) > 0;
+                caption, sortOrder) > 0;
         if (updated) {
             auditService.log("node.update", "node", id,
                     "{\"spaceId\":\"" + spaceId + "\"}");
@@ -66,7 +65,7 @@ public class NodeService {
     }
 
     public boolean delete(UUID spaceId, UUID id) {
-        permissionService.checkCanEdit(spaceId);
+        RoleContext.requireAtLeast(Role.EDITOR);
         boolean deleted = nodeRepository.deleteById(id) > 0;
         if (deleted) {
             auditService.log("node.delete", "node", id,
@@ -76,7 +75,7 @@ public class NodeService {
     }
 
     public boolean move(UUID spaceId, UUID nodeId, UUID newParentId, Double sortOrder) {
-        permissionService.checkCanEdit(spaceId);
+        RoleContext.requireAtLeast(Role.EDITOR);
         boolean moved = nodeRepository.updateParentAndSort(nodeId, newParentId, sortOrder) > 0;
         if (moved) {
             auditService.log("node.move", "node", nodeId,
