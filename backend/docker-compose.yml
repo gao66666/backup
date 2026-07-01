@@ -1,0 +1,35 @@
+# ============================================================
+# Workspace 本地开发 Docker Compose（仅基础设施）
+# 用法: docker compose up -d
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: workspace-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: workspace
+      POSTGRES_USER: workspace
+      POSTGRES_PASSWORD: workspace_dev_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workspace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    container_name: workspace-valkey
+    ports:
+      - "6379:6379"
+    command: valkey-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - valkey-data:/data
+
+volumes:
+  postgres-data:
+  valkey-data:

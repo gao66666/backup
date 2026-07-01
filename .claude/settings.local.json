@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:5174/)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=/tmp/workspace-shot.png http://localhost:5174/)",
+      "Read(//tmp/**)",
+      "Bash(npx vue-tsc *)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=/tmp/workspace-shot2.png http://localhost:5174/)",
+      "Bash(ls -la /Users/gao/work/mosora)",
+      "Read(//Users/gao/work/**)",
+      "Bash(cat /Users/gao/work/mosora/pom.xml 2>/dev/null | head -100)",
+      "Read(//Users/gao/work/mosora/**)",
+      "Bash(find /Users/gao -name \"pom.xml\" 2>/dev/null | xargs grep -l \"mosora\\\\|MOSORA\" 2>/dev/null | head -5)",
+      "Read(//Users/gao/**)"
+    ]
+  }
+}
