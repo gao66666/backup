@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import FileTreeItem from './components/FileTreeItem.vue'
 import { useMarkdown } from './composables/useMarkdown'
 
@@ -15,15 +15,31 @@ type ApiNode = {
   has_children: boolean
   content?: string
   properties?: string
+  caption?: string | null
   sort_order?: number
+  dirty?: boolean   // 本地未保存标记,不入后端
 }
 
 const nodesMap = ref<Map<string, ApiNode>>(new Map())
 const expanded = ref(new Set<string>())
 const selected = ref<string | null>(null)
+const renamingId = ref<string | null>(null)   // 当前正在重命名的节点 ID(FileTreeItem 据此切 input)
 const loading = ref(false)
 const isPreview = ref(false)
 const editContent = ref('')
+const savingNow = ref(false)               // 保存进行中(按钮 disabled 用)
+const loadingContent = ref(false)          // 程序设置 editContent 时为 true(watch(editContent) 跳过,避免误标 dirty)
+
+// 监听 editContent 变化,标记 dirty(直接 Map.set 不比较)
+watch(editContent, () => {
+  if (loadingContent.value) return   // 程序设置值,不标 dirty
+  if (!selected.value) return
+  const orig = nodesMap.value.get(selected.value)
+  if (!orig || orig.dirty) return
+  const newMap = new Map(nodesMap.value)
+  newMap.set(selected.value, { ...orig, dirty: true })
+  nodesMap.value = newMap
+})
 const draggingId = ref<string | null>(null)
 const dropTargetId = ref<string | null>(null)
 
@@ -54,18 +70,57 @@ function onDrop(targetId: string, e: DragEvent) {
 }
 
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const fileUploadTarget = ref<string | null>(null)  // 上传到的父节点 ID(null = 根)
+
+/**
+ * 根据文件名后缀推断节点 type。无后缀 → collection(文件夹)。
+ * 真实类型映射(简易版,够 workspace 当前用)。
+ */
+function inferNodeTypeFromName(name: string): { type: ApiNode['type']; kind: string } {
+  const lower = name.toLowerCase()
+  // 文档
+  if (/\.(md|txt|doc|docx|pdf|json|log)$/.test(lower)) return { type: 'doc', kind: 'text' }
+  // 图片
+  if (/\.(png|jpe?g|gif|webp|svg|bmp)$/.test(lower)) return { type: 'image', kind: 'image' }
+  // 视频
+  if (/\.(mp4|mov|avi|webm|mkv)$/.test(lower)) return { type: 'video', kind: 'video' }
+  // 音频
+  if (/\.(mp3|wav|ogg|flac|m4a)$/.test(lower)) return { type: 'audio', kind: 'audio' }
+  // 其他后缀或无后缀(没有 . 的)=> 兜底 collection
+  if (!/\./.test(name)) return { type: 'collection', kind: '' }
+  return { type: 'doc', kind: 'text' }
+}
 
 function triggerUpload() {
+  fileUploadTarget.value = null  // 顶部按钮 → 根
+  fileInputRef.value?.click()
+}
+
+function triggerUploadToFolder(nodeId: string) {
+  fileUploadTarget.value = nodeId
   fileInputRef.value?.click()
 }
 
 async function onFileSelected(e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (!files?.length) return
-  const file = files[0]
+  const parentId = fileUploadTarget.value
+  for (const file of Array.from(files)) {
+    await uploadAndCreateNode(parentId, file)
+  }
+  ;(e.target as HTMLInputElement).value = ''
+  fileUploadTarget.value = null   // 重置,避免影响下次点击
+}
+
+/**
+ * 上传文件到 MinIO,然后在指定父节点(parentId)下创建一个节点。
+ * parentId = null 表示放在根。
+ */
+async function uploadAndCreateNode(parentId: string | null, file: File) {
   const token = await getToken()
   const form = new FormData()
   form.append('file', file)
+  let url: string
   try {
     const res = await fetch('/api/uploads', {
       method: 'POST',
@@ -77,17 +132,64 @@ async function onFileSelected(e: Event) {
       return
     }
     const json = await res.json()
-    const url = json.data?.url as string | undefined
-    if (url) {
-      console.log('uploaded:', url)
-      // TODO: 后面把 url 存到某个 image/video 节点的 properties.src,
-      //       当前只 log 看效果
+    url = json.data?.url
+    if (!url) {
+      console.error('upload response missing url')
+      return
     }
   } catch (err) {
     console.error('upload error:', err)
-  } finally {
-    // 清 input value,允许重复选同一文件
-    (e.target as HTMLInputElement).value = ''
+    return
+  }
+
+  // 推断 type 和 kind
+  const mime = file.type
+  let type: 'image' | 'video' | 'audio' | 'doc' = 'doc'
+  let kind = 'text'
+  if (mime.startsWith('image/')) { type = 'image'; kind = 'image' }
+  else if (mime.startsWith('video/')) { type = 'video'; kind = 'video' }
+  else if (mime.startsWith('audio/')) { type = 'audio'; kind = 'audio' }
+
+  // 找 sibling 末尾,作为新节点的 sort_order
+  const siblings = [...nodesMap.value.values()]
+    .filter(n => n.parent_id === parentId)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  const sortOrder = siblings.length === 0
+    ? 1.0
+    : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
+
+  try {
+    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({
+        parentId,
+        type,
+        title: file.name,
+        content: '{}',
+        properties: JSON.stringify({ kind, src: url }),
+        sortOrder,
+      }),
+    })
+    if (!res.ok) {
+      console.error('create node after upload failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const node = json.data as ApiNode | undefined
+    if (!node) return
+    // 乐观更新:加到 Map,展开父
+    const newMap = new Map(nodesMap.value)
+    newMap.set(node.id, node)
+    if (parentId) {
+      const parent = newMap.get(parentId)
+      if (parent) newMap.set(parentId, { ...parent, has_children: true })
+      expanded.value.add(parentId)
+    }
+    nodesMap.value = newMap
+    selected.value = node.id
+  } catch (err) {
+    console.error('create node error:', err)
   }
 }
 
@@ -113,18 +215,18 @@ async function authHeaders(): Promise<HeadersInit> {
   }
 }
 
-async function createNode(type: string) {
-  // 父节点：选中文件夹则建在其下，否则根目录
-  let parentId: string | null = null
-  const sel = selected.value ? nodesMap.value.get(selected.value) : undefined
-  if (sel && sel.type === 'collection') {
-    parentId = sel.id
+async function createNode(placeholderName: string, parentIdOverride?: string) {
+  // 父节点：右键指定 > 选中文件夹 > 根(顶部按钮显式传 null 时强制根)
+  let parentId: string | null = parentIdOverride ?? null
+  if (parentIdOverride === undefined) {
+    const sel = selected.value ? nodesMap.value.get(selected.value) : undefined
+    if (sel && sel.type === 'collection') {
+      parentId = sel.id
+    }
   }
 
-  // 弹窗命名，取消则不创建
-  const defaultName = type === 'collection' ? '未命名文件夹' : '未命名文档'
-  const title = window.prompt('请输入名称', defaultName)
-  if (!title) return
+  // 用占位文件名后缀推断 type
+  const inferred = inferNodeTypeFromName(placeholderName)
 
   // 放在同级末尾
   const siblings = [...nodesMap.value.values()]
@@ -135,15 +237,15 @@ async function createNode(type: string) {
     : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
 
   try {
-    const res = await fetch('/api/nodes', {
+    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
       method: 'POST',
       headers: await authHeaders(),
       body: JSON.stringify({
-        spaceId: SPACE_ID,
         parentId,
-        type,
-        title,
+        type: inferred.type,
+        title: placeholderName,
         content: '{}',
+        properties: JSON.stringify({ kind: inferred.kind }),
         sortOrder,
       }),
     })
@@ -162,6 +264,8 @@ async function createNode(type: string) {
     }
     nodesMap.value = newMap
     selected.value = node.id
+    // 创建后自动进入 rename 态,沿用 inline input 改名
+    renamingId.value = node.id
   } catch (e) {
     console.error('create node failed:', e)
   }
@@ -188,6 +292,7 @@ const nodeService = {
 
 watch(selected, (nodeId: string | null) => {
   isPreview.value = false
+  loadingContent.value = true   // 保护:下面给 editContent 赋值不会触发 watch 误标 dirty
   if (nodeId) {
     const node = nodesMap.value.get(nodeId)
     try {
@@ -199,6 +304,7 @@ watch(selected, (nodeId: string | null) => {
   } else {
     editContent.value = ''
   }
+  nextTick(() => { loadingContent.value = false })
 })
 
 async function loadChildren(parentId: string) {
@@ -246,7 +352,58 @@ async function handleToggle(nodeId: string) {
 }
 
 function handleSelect(nodeId: string) {
+  // 切换前自动保存旧节点的 dirty 内容
+  if (selected.value && selected.value !== nodeId) {
+    const old = nodesMap.value.get(selected.value)
+    if (old?.dirty) {
+      // ⚠️ 传当前 editContent(还是旧节点的内容,watch(selected) 还没跑)
+      saveNodeContent(selected.value, editContent.value, false)
+    }
+  }
   selected.value = nodeId
+}
+
+/**
+ * 保存节点 content(纯前端 → 后端 PUT)。
+ * showFeedback: true 时清 dirty + 显示反馈;false 时静默(切换节点用)。
+ */
+async function saveNodeContent(nodeId: string, content: string, showFeedback = true) {
+  const orig = nodesMap.value.get(nodeId)
+  if (!orig) return
+  savingNow.value = true
+  try {
+    const res = await fetch(`/api/nodes/${nodeId}?spaceId=${SPACE_ID}`, {
+      method: 'PUT',
+      headers: await authHeaders(),
+      body: JSON.stringify({
+        title: orig.title,
+        content: JSON.stringify({ text: content }),
+        properties: orig.properties,
+        caption: orig.caption,
+      }),
+    })
+    if (!res.ok) {
+      console.error('save failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const fresh = json.data as ApiNode | undefined
+    if (fresh) {
+      const newMap = new Map(nodesMap.value)
+      newMap.set(nodeId, fresh)
+      nodesMap.value = newMap
+    }
+    if (showFeedback) {
+      const newMap2 = new Map(nodesMap.value)
+      const cur = newMap2.get(nodeId)
+      if (cur) newMap2.set(nodeId, { ...cur, dirty: false })
+      nodesMap.value = newMap2
+    }
+  } catch (err) {
+    console.error('save error:', err)
+  } finally {
+    savingNow.value = false
+  }
 }
 
 function getRootNodes(): ApiNode[] {
@@ -283,6 +440,7 @@ type ContextMenu = {
   y: number
   type: 'collection' | 'doc' | 'image' | 'video' | 'audio' | null
   name: string
+  targetId: string | null   // 右键点中的节点 ID(action 里要用)
 }
 
 const contextMenu = ref<ContextMenu>({
@@ -291,36 +449,192 @@ const contextMenu = ref<ContextMenu>({
   y: 0,
   type: null,
   name: '',
+  targetId: null,
 })
 
-function showContextMenu(event: MouseEvent, type: 'collection' | 'doc' | 'image' | 'video' | 'audio', name: string) {
+function showContextMenu(event: MouseEvent, nodeId: string, type: 'collection' | 'doc' | 'image' | 'video' | 'audio', name: string) {
   event.preventDefault()
-  contextMenu.value = { visible: true, x: event.clientX, y: event.clientY, type, name }
+  contextMenu.value = { visible: true, x: event.clientX, y: event.clientY, type, name, targetId: nodeId }
 }
 
 function hideContextMenu() {
   contextMenu.value.visible = false
 }
 
+// 内嵌 SVG 图标(尺寸 14×14,跟 toolbar-btn 风格一致)
+// 跟 src/components/FileTreeItem.vue 里的图标同款(简化版)
+const ICONS = {
+  doc: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+  edit: '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
+  open: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><polyline points="9 14 12 11 15 14"/><line x1="12" y1="11" x2="12" y2="17"/>',
+}
+
+function svg(name: keyof typeof ICONS): string {
+  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`
+}
+
 const menuItems = computed(() => {
   if (!contextMenu.value.type) return []
+  const targetId = contextMenu.value.targetId
   if (contextMenu.value.type === 'collection') {
     return [
-      { label: 'New Doc', icon: '📄', action: () => {} },
-      { label: 'New Collection', icon: '📁', action: () => {} },
-      { label: 'Upload', icon: '⬆️', action: () => {} },
-      { label: 'Rename', icon: '✏️', action: () => {} },
-      { label: 'Delete', icon: '🗑️', action: () => {} },
+      { label: 'New Doc', svg: svg('doc'), action: () => { if (targetId) createNode('temp.md', targetId) } },
+      { label: 'New Collection', svg: svg('folder'), action: () => { if (targetId) createNode('untitled', targetId) } },
+      { label: 'Upload', svg: svg('upload'), action: () => { if (targetId) triggerUploadToFolder(targetId) } },
+      { label: 'Rename', svg: svg('edit'), action: () => { if (targetId) startRename(targetId) } },
+      { label: 'Delete', svg: svg('trash'), action: () => { if (targetId) deleteNode(targetId) } },
     ]
   }
   return [
-    { label: 'Open', icon: '📂', action: () => {} },
-    { label: 'Upload', icon: '⬆️', action: () => {} },
-    { label: 'Duplicate', icon: '📋', action: () => {} },
-    { label: 'Rename', icon: '✏️', action: () => {} },
-    { label: 'Delete', icon: '🗑️', action: () => {} },
+    { label: 'Upload', svg: svg('upload'), action: () => { if (targetId) triggerUploadToFolder(targetId) } },
+    { label: 'Duplicate', svg: svg('copy'), action: () => { if (targetId) duplicateNode(targetId) } },
+    { label: 'Rename', svg: svg('edit'), action: () => { if (targetId) startRename(targetId) } },
+    { label: 'Delete', svg: svg('trash'), action: () => { if (targetId) deleteNode(targetId) } },
   ]
 })
+
+/**
+ * 把节点切到重命名态(FileTreeItem 看到 renameTargetId === node.id 就显示 input 全选)
+ */
+function startRename(targetId: string) {
+  renamingId.value = targetId
+}
+
+/**
+ * FileTreeItem 回车时调:PUT 后端,成功后退出编辑态
+ */
+async function commitRename(targetId: string, newTitle: string) {
+  renamingId.value = null
+  const orig = nodesMap.value.get(targetId)
+  if (!orig) return
+  if (!newTitle || newTitle === orig.title) return
+
+  // 按新名字后缀推断 type + kind(后缀变了 → type 跟变)
+  const inferred = inferNodeTypeFromName(newTitle)
+  // properties 保留 orig,只覆盖 kind 字段(让 src 之类不动)
+  const origProps = orig.properties ? JSON.parse(orig.properties) : {}
+  const newProps = { ...origProps, kind: inferred.kind }
+
+  try {
+    const res = await fetch(`/api/nodes/${targetId}?spaceId=${SPACE_ID}`, {
+      method: 'PUT',
+      headers: await authHeaders(),
+      body: JSON.stringify({
+        title: newTitle,
+        type: inferred.type,
+        content: orig.content,
+        properties: JSON.stringify(newProps),
+        caption: orig.caption,
+      }),
+    })
+    if (!res.ok) {
+      console.error('rename failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const fresh = json.data as ApiNode | undefined
+    if (!fresh) return
+    const newMap = new Map(nodesMap.value)
+    newMap.set(targetId, fresh)
+    nodesMap.value = newMap
+  } catch (err) {
+    console.error('rename error:', err)
+  }
+}
+
+/**
+ * FileTreeItem Esc 或 blur 时调:只退出编辑态,不改
+ */
+function cancelRename() {
+  renamingId.value = null
+}
+
+/**
+ * 删除节点(后端走软删)。
+ * 弹窗确认;成功后更新本地 Map + 父节点的 has_children。
+ */
+async function deleteNode(targetId: string) {
+  const orig = nodesMap.value.get(targetId)
+  if (!orig) return
+  try {
+    const res = await fetch(`/api/nodes/${targetId}?spaceId=${SPACE_ID}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    })
+    if (!res.ok) {
+      console.error('delete failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const payload = json.data ?? {}
+    const newMap = new Map(nodesMap.value)
+    // 删本地节点
+    newMap.delete(targetId)
+    // 更新父节点的 has_children(后端响应里带)
+    if (payload.oldParent) {
+      newMap.set(payload.oldParent.id, payload.oldParent)
+    }
+    // 如果删的是选中节点,清空选中
+    if (selected.value === targetId) selected.value = null
+    nodesMap.value = newMap
+  } catch (err) {
+    console.error('delete error:', err)
+  }
+}
+
+/**
+ * 复制节点(不复制子节点)。
+ * title 加 "_copy" 后缀,放同父节点末尾。
+ */
+async function duplicateNode(targetId: string) {
+  const orig = nodesMap.value.get(targetId)
+  if (!orig) return
+  // 算 sortOrder:同父兄弟最大 sort_order + 1
+  const siblings = [...nodesMap.value.values()]
+    .filter(n => n.parent_id === orig.parent_id)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  const sortOrder = siblings.length === 0
+    ? 1.0
+    : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
+
+  try {
+    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({
+        parentId: orig.parent_id,
+        type: orig.type,
+        title: `${orig.title}_copy`,
+        content: orig.content ?? '{}',
+        properties: orig.properties ?? '{}',
+        caption: orig.caption ?? null,
+        sortOrder,
+      }),
+    })
+    if (!res.ok) {
+      console.error('duplicate failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const node = json.data as ApiNode | undefined
+    if (!node) return
+    // 乐观更新
+    const newMap = new Map(nodesMap.value)
+    newMap.set(node.id, node)
+    if (orig.parent_id) {
+      const parent = newMap.get(orig.parent_id)
+      if (parent) newMap.set(orig.parent_id, { ...parent, has_children: true })
+    }
+    nodesMap.value = newMap
+    selected.value = node.id
+  } catch (err) {
+    console.error('duplicate error:', err)
+  }
+}
 </script>
 
 <template>
@@ -342,10 +656,10 @@ const menuItems = computed(() => {
       <section class="sidebar-block">
         <span class="block-label">File tree</span>
         <div class="tree-toolbar">
-          <button type="button" class="toolbar-btn" title="New File" @click="createNode('doc')">
+          <button type="button" class="toolbar-btn" title="New File" @click="createNode('temp.md')">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
           </button>
-          <button type="button" class="toolbar-btn" title="New Folder" @click="createNode('collection')">
+          <button type="button" class="toolbar-btn" title="New Folder" @click="createNode('untitled')">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           </button>
           <button type="button" class="toolbar-btn" title="Upload" @click="triggerUpload">
@@ -364,12 +678,16 @@ const menuItems = computed(() => {
             :selected="selected"
             :depth="0"
             :drop-target-id="dropTargetId"
+            :rename-target-id="renamingId"
+            :dirty="node.dirty"
             @toggle="handleToggle"
             @select="handleSelect"
             @contextmenu="showContextMenu"
             @dragstart="onDragStart"
             @dragover="onDragOver"
             @drop="onDrop"
+            @rename-commit="(id: string, newTitle: string) => commitRename(id, newTitle)"
+            @rename-cancel="cancelRename"
           />
         </ul>
       </section>
@@ -394,6 +712,13 @@ const menuItems = computed(() => {
             <div class="editor-toolbar">
               <button type="button" class="mode-btn" :class="{ active: !isPreview }" @click="isPreview = false">Edit</button>
               <button type="button" class="mode-btn" :class="{ active: isPreview }" @click="isPreview = true">Preview</button>
+              <button
+                type="button"
+                class="mode-btn save-btn"
+                :class="{ dirty: nodesMap.get(selected)?.dirty, saving: savingNow }"
+                :disabled="!nodesMap.get(selected)?.dirty || savingNow"
+                @click="saveNodeContent(selected, editContent, true)"
+              >{{ savingNow ? 'Saving…' : 'Save' }}</button>
             </div>
             <textarea
               v-if="!isPreview"
@@ -413,7 +738,7 @@ const menuItems = computed(() => {
     <div v-if="contextMenu.visible" class="context-menu-backdrop" @click="hideContextMenu" @contextmenu.prevent="hideContextMenu">
       <ul class="context-menu" :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }" @click.stop>
         <li v-for="item in menuItems" :key="item.label" class="context-menu-item" @click="item.action(); hideContextMenu()">
-          <span class="context-menu-icon">{{ item.icon }}</span>
+          <span class="context-menu-icon" v-html="item.svg"></span>
           <span>{{ item.label }}</span>
         </li>
       </ul>

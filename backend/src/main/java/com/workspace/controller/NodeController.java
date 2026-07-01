@@ -23,8 +23,8 @@ public class NodeController {
     }
 
     @PostMapping
-    public ResponseEntity<?> create(@RequestBody Map<String, Object> body) {
-        UUID spaceId = RoleContext.current().spaceId();
+    public ResponseEntity<?> create(@RequestParam UUID spaceId, @RequestBody Map<String, Object> body) {
+        // spaceId 来自 query(对齐路由组 B 其他端点)
         UUID parentId = body.get("parentId") != null ? UUID.fromString((String) body.get("parentId")) : null;
         String type = (String) body.get("type");
         String title = (String) body.get("title");
@@ -76,11 +76,17 @@ public class NodeController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(@PathVariable UUID id) {
         UUID spaceId = RoleContext.current().spaceId();
+
+        // 拿旧 parent_id 和节点状态(因为 delete 内部要查一次,这里手动查以拿)
+        java.util.Map<String, Object> before = nodeService.getById(spaceId, id);
+        if (before == null) return ResponseEntity.notFound().build();
+        UUID parentId = (UUID) before.get("parent_id");
+
         boolean deleted = nodeService.delete(spaceId, id);
-        if (!deleted) {
-            return ResponseEntity.notFound().build();
-        }
-        return ResponseEntity.ok(ApiResponse.ok(Map.of("success", true, "id", id.toString())));
+        if (!deleted) return ResponseEntity.notFound().build();
+
+        // 返回 deletedNode + oldParent(带现算 has_children),让前端更新父节点最新状态
+        return ResponseEntity.ok(ApiResponse.ok(nodeService.getDeleteResult(id, parentId)));
     }
 
     @PatchMapping("/{id}/move")

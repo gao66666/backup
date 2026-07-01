@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { computed, nextTick, ref, watch } from 'vue'
+
 type ApiNode = {
   id: string
   title: string
   type: string
   parent_id: string | null
   has_children: boolean
+  dirty?: boolean
 }
 
 const props = defineProps<{
@@ -14,19 +17,44 @@ const props = defineProps<{
   selected: string | null
   depth: number
   dropTargetId: string | null
+  renameTargetId: string | null
 }>()
 
 const emit = defineEmits<{
   toggle: [nodeId: string]
   select: [nodeId: string]
-  contextmenu: [event: MouseEvent, type: 'collection' | 'doc' | 'image' | 'video' | 'audio', name: string]
+  contextmenu: [event: MouseEvent, nodeId: string, type: 'collection' | 'doc' | 'image' | 'video' | 'audio', name: string]
   dragstart: [nodeId: string, event: DragEvent]
   dragover: [nodeId: string, event: DragEvent]
   drop: [nodeId: string, event: DragEvent]
+  'rename-commit': [nodeId: string, newTitle: string]
+  'rename-cancel': [nodeId: string]
 }>()
 
 function getChildren(parentId: string, nodesMap: Map<string, ApiNode>): ApiNode[] {
   return [...nodesMap.values()].filter(n => n.parent_id === parentId)
+}
+
+const isRenaming = computed(() => props.renameTargetId === props.node.id)
+const isDirty = computed(() => props.node.dirty === true)
+const editingTitle = ref(props.node.title)
+const inputRef = ref<HTMLInputElement | null>(null)
+
+// 进入 rename 态时,初始化为当前 title 并自动 focus + select
+watch(isRenaming, async (on) => {
+  if (on) {
+    editingTitle.value = props.node.title
+    await nextTick()
+    inputRef.value?.focus()
+    inputRef.value?.select()
+  }
+})
+
+function commit() {
+  emit('rename-commit', props.node.id, editingTitle.value.trim())
+}
+function cancel() {
+  emit('rename-cancel', props.node.id)
 }
 </script>
 
@@ -39,7 +67,7 @@ function getChildren(parentId: string, nodesMap: Map<string, ApiNode>): ApiNode[
       :style="{ paddingLeft: `${8 + depth * 14}px` }"
       draggable="true"
       @click="node.has_children ? emit('toggle', node.id) : emit('select', node.id)"
-      @contextmenu="emit('contextmenu', $event, node.type as 'collection' | 'doc' | 'image' | 'video' | 'audio', node.title)"
+      @contextmenu="emit('contextmenu', $event, node.id, node.type as 'collection' | 'doc' | 'image' | 'video' | 'audio', node.title)"
       @dragstart="emit('dragstart', node.id, $event)"
       @dragover="emit('dragover', node.id, $event)"
       @drop="emit('drop', node.id, $event)"
@@ -56,7 +84,19 @@ function getChildren(parentId: string, nodesMap: Map<string, ApiNode>): ApiNode[
         <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
       </span>
       <span class="node-name" :class="{ selected: selected === node.id && !node.has_children }">
-        {{ node.title }}
+        <input
+          v-if="isRenaming"
+          ref="inputRef"
+          v-model="editingTitle"
+          class="node-rename-input"
+          @keydown.enter.prevent="commit"
+          @keydown.esc.prevent="cancel"
+          @blur="cancel"
+        />
+        <template v-else>
+          {{ node.title }}
+          <span v-if="isDirty" class="dirty-dot" title="未保存"></span>
+        </template>
       </span>
     </button>
 
@@ -71,12 +111,15 @@ function getChildren(parentId: string, nodesMap: Map<string, ApiNode>): ApiNode[
         :selected="selected"
         :depth="depth + 1"
         :drop-target-id="dropTargetId"
+        :rename-target-id="renameTargetId"
         @toggle="emit('toggle', $event)"
         @select="emit('select', $event)"
-        @contextmenu="(e: MouseEvent, t: 'collection' | 'doc' | 'image' | 'video' | 'audio', n: string) => emit('contextmenu', e, t, n)"
+        @contextmenu="(e: MouseEvent, id: string, t: 'collection' | 'doc' | 'image' | 'video' | 'audio', n: string) => emit('contextmenu', e, id, t, n)"
         @dragstart="(id: string, e: DragEvent) => emit('dragstart', id, e)"
         @dragover="(id: string, e: DragEvent) => emit('dragover', id, e)"
         @drop="(id: string, e: DragEvent) => emit('drop', id, e)"
+        @rename-commit="(id: string, newTitle: string) => emit('rename-commit', id, newTitle)"
+        @rename-cancel="(id: string) => emit('rename-cancel', id)"
       />
     </ul>
   </li>

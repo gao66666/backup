@@ -40,7 +40,7 @@ public class NodeRepository {
                         field("title", String.class),
                         field("content", SQLDataType.JSONB.nullable()),
                         field("properties", SQLDataType.JSONB.nullable()),
-                        field("description", String.class),
+                        field("caption", String.class),
                         field("sort_order", Double.class),
                         field("is_deleted", Boolean.class),
                         field("created_by", UUID.class),
@@ -88,7 +88,7 @@ public class NodeRepository {
                 .set(field("title", String.class), title)
                 .set(field("content", SQLDataType.JSONB), content != null ? cast(content, SQLDataType.JSONB) : null)
                 .set(field("properties", SQLDataType.JSONB), properties != null ? cast(properties, SQLDataType.JSONB) : null)
-                .set(field("description", String.class), caption)
+                .set(field("caption", String.class), caption)
                 .set(field("sort_order", Double.class), sortOrder)
                 .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
                 .where(field("id", UUID.class).eq(id))

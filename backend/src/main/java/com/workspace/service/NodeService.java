@@ -89,4 +89,17 @@ public class NodeService {
         }
         return result;
     }
+
+    /**
+     * DELETE 后的连带查询:返回被删节点(标记 is_deleted=true)+ 旧父节点(带现算 has_children)。
+     * Controller 用这个构造 delete 响应,让前端知道旧父的 has_children 是不是变了。
+     */
+    public Map<String, Object> getDeleteResult(UUID nodeId, UUID oldParentId) {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("deletedNode", nodeRepository.findByIdWithHasChildren(nodeId));
+        if (oldParentId != null) {
+            result.put("oldParent", nodeRepository.findByIdWithHasChildren(oldParentId));
+        }
+        return result;
+    }
 }
