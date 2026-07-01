@@ -24,13 +24,15 @@ public class SpaceMemberController {
         UUID spaceId = RoleContext.current().spaceId();
         UUID userId = UUID.fromString((String) body.get("userId"));
         String role = (String) body.get("role");
-        return ResponseEntity.ok(spaceMemberService.create(spaceId, userId, role));
+        return ResponseEntity.ok(ApiResponse.ok(
+                spaceMemberService.create(spaceId, userId, role)));
     }
 
     @GetMapping
-    public ResponseEntity<List<Map<String, Object>>> getBySpaceId() {
+    public ResponseEntity<?> getBySpaceId() {
         UUID spaceId = RoleContext.current().spaceId();
-        return ResponseEntity.ok(spaceMemberService.getBySpaceId(spaceId));
+        return ResponseEntity.ok(ApiResponse.ok(
+                spaceMemberService.getBySpaceId(spaceId)));
     }
 
     @GetMapping("/{id}")
@@ -39,7 +41,7 @@ public class SpaceMemberController {
         if (result == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
     @PutMapping("/{id}")
@@ -49,7 +51,7 @@ public class SpaceMemberController {
         if (!updated) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(Map.of("success", true, "id", id.toString())));
     }
 
     @DeleteMapping("/{id}")
@@ -58,6 +60,6 @@ public class SpaceMemberController {
         if (!deleted) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(Map.of("success", true, "id", id.toString())));
     }
 }

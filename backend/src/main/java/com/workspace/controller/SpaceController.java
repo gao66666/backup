@@ -1,12 +1,10 @@
 package com.workspace.controller;
 
-import com.workspace.service.RoleContext;
 import com.workspace.service.SpaceService;
 import com.workspace.util.AuthService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -26,13 +24,15 @@ public class SpaceController {
     public ResponseEntity<?> create(@RequestBody Map<String, Object> body) {
         UUID ownerId = authService.getCurrentUserId();
         String name = (String) body.get("name");
-        return ResponseEntity.ok(spaceService.create(name, ownerId, null));
+        return ResponseEntity.ok(ApiResponse.ok(
+                spaceService.create(name, ownerId, null)));
     }
 
     @GetMapping
-    public ResponseEntity<List<Map<String, Object>>> getAll() {
+    public ResponseEntity<?> getAll() {
         UUID userId = authService.getCurrentUserId();
-        return ResponseEntity.ok(spaceService.getAllByUserId(userId));
+        return ResponseEntity.ok(ApiResponse.ok(
+                spaceService.getAllByUserId(userId)));
     }
 
     @GetMapping("/{id}")
@@ -41,7 +41,7 @@ public class SpaceController {
         if (result == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
     @PutMapping("/{id}")
@@ -51,7 +51,7 @@ public class SpaceController {
         if (!updated) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(spaceService.getById(id)));
     }
 
     @DeleteMapping("/{id}")
@@ -60,6 +60,6 @@ public class SpaceController {
         if (!deleted) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(Map.of("success", true, "id", id.toString())));
     }
 }

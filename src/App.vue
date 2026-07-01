@@ -59,11 +59,57 @@ function triggerUpload() {
   fileInputRef.value?.click()
 }
 
-function onFileSelected(e: Event) {
+async function onFileSelected(e: Event) {
   const files = (e.target as HTMLInputElement).files
-  if (files?.length) {
-    // Just log for now
-    console.log('selected files:', files.length)
+  if (!files?.length) return
+  const file = files[0]
+  const token = await getToken()
+  const form = new FormData()
+  form.append('file', file)
+  try {
+    const res = await fetch('/api/uploads', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: form,
+    })
+    if (!res.ok) {
+      console.error('upload failed:', res.status, await res.text())
+      return
+    }
+    const json = await res.json()
+    const url = json.data?.url as string | undefined
+    if (url) {
+      console.log('uploaded:', url)
+      // TODO: 后面把 url 存到某个 image/video 节点的 properties.src,
+      //       当前只 log 看效果
+    }
+  } catch (err) {
+    console.error('upload error:', err)
+  } finally {
+    // 清 input value,允许重复选同一文件
+    (e.target as HTMLInputElement).value = ''
+  }
+}
+
+// ⚠️ 开发期鉴权:启动时调 /api/dev/login 拿 JWT,后续 fetch 全用 Bearer token。
+// 真合并 Monsora 时,这块换成 Monsora 的登录端点。
+const DEV_USER_ID = '00000000-0000-0000-0000-0000000000aa'
+let cachedToken: string | null = null
+
+async function getToken(): Promise<string> {
+  if (cachedToken) return cachedToken
+  const res = await fetch(`/api/dev/login?userId=${DEV_USER_ID}`)
+  if (!res.ok) throw new Error(`dev login failed: ${res.status}`)
+  const json = await res.json()
+  cachedToken = json.data.token
+  return cachedToken!
+}
+
+async function authHeaders(): Promise<HeadersInit> {
+  const token = await getToken()
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,
   }
 }
 
@@ -91,7 +137,7 @@ async function createNode(type: string) {
   try {
     const res = await fetch('/api/nodes', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({
         spaceId: SPACE_ID,
         parentId,
@@ -123,24 +169,20 @@ async function createNode(type: string) {
 
 const nodeService = {
   async move(spaceId: string, nodeId: string, newParentId: string, sortOrder: number) {
-    await fetch(`/api/nodes/${nodeId}/move?spaceId=${spaceId}`, {
+    const res = await fetch(`/api/nodes/${nodeId}/move?spaceId=${spaceId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ newParentId, sortOrder })
     })
-    // Update local state
-    const node = nodesMap.value.get(nodeId)
-    if (node) {
-      const newMap = new Map(nodesMap.value)
-      // Update dragged node's parent and sort
-      newMap.set(nodeId, { ...node, parent_id: newParentId, sort_order: sortOrder })
-      // Update new parent's has_children to true
-      const newParent = newMap.get(newParentId)
-      if (newParent) {
-        newMap.set(newParentId, { ...newParent, has_children: true })
-      }
-      nodesMap.value = newMap
-    }
+    if (!res.ok) return
+    const json = await res.json()
+    // 响应结构: data = { movedNode, oldParent, newParent } —— 后端保证 has_children 准确
+    const payload = json.data ?? {}
+    const newMap = new Map(nodesMap.value)
+    if (payload.movedNode) newMap.set(payload.movedNode.id, payload.movedNode)
+    if (payload.oldParent) newMap.set(payload.oldParent.id, payload.oldParent)
+    if (payload.newParent) newMap.set(payload.newParent.id, payload.newParent)
+    nodesMap.value = newMap
   }
 }
 
@@ -163,7 +205,9 @@ async function loadChildren(parentId: string) {
   if ([...nodesMap.value.values()].some(n => n.parent_id === parentId)) return
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}&parentId=${parentId}`)
+    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}&parentId=${parentId}`, {
+      headers: await authHeaders(),
+    })
     const json = await res.json()
     const data: ApiNode[] = json.data ?? []
     data.forEach(node => nodesMap.value.set(node.id, node))
@@ -175,7 +219,9 @@ async function loadChildren(parentId: string) {
 async function loadRootNodes() {
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`)
+    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+      headers: await authHeaders(),
+    })
     const json = await res.json()
     const data: ApiNode[] = json.data ?? []
     nodesMap.value.clear()

@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 
 /**
  * 路由组 B 的拦截器:
- *   1. 读 X-User-Id 拿当前 userId(认证,Monsora 网关已前置做了真鉴权)
+ *   1. 读 JWT(由 JwtAuthFilter 解析并塞进 SecurityContext)拿当前 userId
  *   2. 从请求里解析出当前操作的 spaceId(从 query 或 path)
  *   3. 查 DB 拿该用户在该空间的角色
  *   4. 把 (userId, spaceId, role) 塞 RoleContext
@@ -40,7 +40,7 @@ public class SpaceAuthInterceptor implements HandlerInterceptor {
             try {
                 userId = authService.getCurrentUserId();
             } catch (Exception e) {
-                writeError(res, HttpStatus.UNAUTHORIZED, "Missing X-User-Id header");
+                writeError(res, HttpStatus.UNAUTHORIZED, "Missing or invalid Authorization Bearer token");
                 return false;
             }
 

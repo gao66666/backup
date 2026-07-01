@@ -34,15 +34,17 @@ public class NodeController {
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
         UUID createdBy = authService.getCurrentUserId();
 
-        return ResponseEntity.ok(nodeService.create(spaceId, parentId, type, title,
-                content, properties, caption, sortOrder, createdBy));
+        return ResponseEntity.ok(ApiResponse.ok(
+                nodeService.create(spaceId, parentId, type, title,
+                        content, properties, caption, sortOrder, createdBy)));
     }
 
     @GetMapping
-    public ResponseEntity<List<Map<String, Object>>> getBySpaceIdAndParentId(
+    public ResponseEntity<?> getBySpaceIdAndParentId(
             @RequestParam(required = false) UUID parentId) {
         UUID spaceId = RoleContext.current().spaceId();
-        return ResponseEntity.ok(nodeService.getBySpaceIdAndParentId(spaceId, parentId));
+        return ResponseEntity.ok(ApiResponse.ok(
+                nodeService.getBySpaceIdAndParentId(spaceId, parentId)));
     }
 
     @GetMapping("/{id}")
@@ -52,7 +54,7 @@ public class NodeController {
         if (result == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
     @PutMapping("/{id}")
@@ -64,11 +66,11 @@ public class NodeController {
         String caption = (String) body.get("caption");
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
 
-        boolean updated = nodeService.update(spaceId, id, title, content, properties, caption, sortOrder);
-        if (!updated) {
+        Map<String, Object> updated = nodeService.update(spaceId, id, title, content, properties, caption, sortOrder);
+        if (updated == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(updated));
     }
 
     @DeleteMapping("/{id}")
@@ -78,7 +80,7 @@ public class NodeController {
         if (!deleted) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok(ApiResponse.ok(Map.of("success", true, "id", id.toString())));
     }
 
     @PatchMapping("/{id}/move")
@@ -86,10 +88,17 @@ public class NodeController {
         UUID spaceId = RoleContext.current().spaceId();
         UUID newParentId = body.get("newParentId") != null ? UUID.fromString((String) body.get("newParentId")) : null;
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
+
+        // 先查旧 parent(因为 move 内部也要查一次,这里手动查以拿旧 parent_id)
+        java.util.Map<String, Object> before = nodeService.getById(spaceId, id);
+        if (before == null) return ResponseEntity.notFound().build();
+        UUID oldParentId = (UUID) before.get("parent_id");
+
         boolean moved = nodeService.move(spaceId, id, newParentId, sortOrder);
-        if (!moved) {
-            return ResponseEntity.notFound().build();
-        }
-        return ResponseEntity.ok().build();
+        if (!moved) return ResponseEntity.notFound().build();
+
+        // 返回 movedNode + oldParent + newParent,让前端一次性更新三处 has_children
+        return ResponseEntity.ok(ApiResponse.ok(
+                nodeService.getMoveResult(id, oldParentId, newParentId)));
     }
 }

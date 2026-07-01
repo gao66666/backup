@@ -12,10 +12,9 @@ import java.util.Map;
  * 全局异常处理。
  *
  * - {@link ForbiddenException} → 403
+ * - IllegalStateException(没鉴权) → 401
+ * - IllegalArgumentException(通常是匿名用户被当 UUID 解析失败) → 401
  * - 其他异常暂不接管,留给 Spring 默认处理(500)
- *
- * 之前在 NodeController / SpaceController / SpaceMemberController 各有一个
- * 重复的 @ExceptionHandler(ForbiddenException),集中到这里。
  */
 @ControllerAdvice
 public class GlobalExceptionHandler {
@@ -23,6 +22,20 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ForbiddenException.class)
     public ResponseEntity<Map<String, String>> handleForbidden(ForbiddenException e) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<Map<String, String>> handleUnauthenticated(IllegalStateException e) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> handleBadRequest(IllegalArgumentException e) {
+        // Spring Security anonymous principal "anonymousUser" 被 UUID.fromString 解析失败会抛这个
+        // 统一当 401
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                 .body(Map.of("error", e.getMessage()));
     }
 }

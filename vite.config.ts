@@ -87,10 +87,25 @@ function localApiMock(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [vue(), localApiMock()],
+  plugins: [
+    vue(),
+    // 读取环境变量决定是否挂 mock 中间件
+    // mock 模式(默认):用本地 mock/api/*.cjs
+    // real 模式:不挂 mock,/api 由 proxy 转发到真后端
+    ...(process.env.VITE_API_MODE === 'real' ? [] : [localApiMock()]),
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
+  },
+  server: {
+    // real 模式:把 /api 代理到 Spring Boot 8080,避开 CORS
+    proxy: process.env.VITE_API_MODE === 'real' ? {
+      '/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+    } : undefined,
   },
 })
