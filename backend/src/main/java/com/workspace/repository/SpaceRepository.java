@@ -23,7 +23,10 @@ public class SpaceRepository {
     }
 
     public Record insert(String name, UUID ownerId, UUID rootNodeId) {
-        UUID id = UUID.randomUUID();
+        return insert(UUID.randomUUID(), name, ownerId, rootNodeId);
+    }
+
+    public Record insert(UUID id, String name, UUID ownerId, UUID rootNodeId) {
         OffsetDateTime now = OffsetDateTime.now();
 
         db.insertInto(table("spaces"),

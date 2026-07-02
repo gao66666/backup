@@ -36,7 +36,24 @@ function resolveNodeByPath(path: string): ResolvedNode | null {
 
 const { render } = useMarkdown(resolveNodeByPath)
 
-const SPACE_ID = '00000000-0000-0000-0000-000000000001'
+// ── 视图切换 ──
+const currentView = ref<'spaces' | 'workspace'>('spaces')
+const currentSpaceId = ref<string | null>(null)
+
+// ── Spaces 列表 ──
+type Space = {
+  id: string
+  name: string
+  owner_id: string
+  root_node_id: string
+  created_at: string
+}
+const spaces = ref<Space[]>([])
+const spacesLoading = ref(false)
+const creatingSpace = ref(false)
+const newSpaceName = ref('')
+const renamingSpaceId = ref<string | null>(null)
+const renameSpaceInput = ref('')
 
 type ApiNode = {
   id: string
@@ -96,7 +113,8 @@ function onDrop(targetId: string, e: DragEvent) {
   // Drop as first child of target
   const children = [...nodesMap.value.values()].filter(n => n.parent_id === targetId)
   const sortOrder = children.length === 0 ? 1.0 : (children[0].sort_order ?? 1) / 2
-  nodeService.move(SPACE_ID, draggedId, targetId, sortOrder)
+  const spaceId = currentSpaceId.value!
+  nodeService.move(spaceId, draggedId, targetId, sortOrder)
   draggingId.value = null
   dropTargetId.value = null
 }
@@ -125,7 +143,7 @@ function onDropRoot(e: DragEvent) {
   const sortOrder = rootNodes.length === 0
     ? 1.0
     : (rootNodes[rootNodes.length - 1].sort_order ?? 0) + 1.0
-  nodeService.move(SPACE_ID, draggedId, null, sortOrder)
+  nodeService.move(currentSpaceId.value!, draggedId, null, sortOrder)
   draggingId.value = null
   dropTargetId.value = null
 }
@@ -272,7 +290,7 @@ async function uploadAndCreateNode(parentId: string | null, file: File) {
     : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
 
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}`, {
       method: 'POST',
       headers: await authHeaders(),
       body: JSON.stringify({
@@ -350,7 +368,7 @@ async function createNode(placeholderName: string, parentIdOverride?: string) {
     : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
 
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}`, {
       method: 'POST',
       headers: await authHeaders(),
       body: JSON.stringify({
@@ -424,7 +442,7 @@ async function loadChildren(parentId: string) {
   if ([...nodesMap.value.values()].some(n => n.parent_id === parentId)) return
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}&parentId=${parentId}`, {
+    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}&parentId=${parentId}`, {
       headers: await authHeaders(),
     })
     const json = await res.json()
@@ -438,7 +456,7 @@ async function loadChildren(parentId: string) {
 async function loadRootNodes() {
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}`, {
       headers: await authHeaders(),
     })
     const json = await res.json()
@@ -485,7 +503,7 @@ async function saveNodeContent(nodeId: string, content: string, showFeedback = t
   if (!orig) return
   savingNow.value = true
   try {
-    const res = await fetch(`/api/nodes/${nodeId}?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes/${nodeId}?spaceId=${currentSpaceId.value}`, {
       method: 'PUT',
       headers: await authHeaders(),
       body: JSON.stringify({
@@ -551,8 +569,109 @@ function getNodePath(nodeId: string | null): string {
   return '/workspace/' + parts.join('/')
 }
 
+// ── Spaces CRUD ──
+async function loadSpaces() {
+  spacesLoading.value = true
+  try {
+    const res = await fetch('/api/spaces', { headers: await authHeaders() })
+    const json = await res.json()
+    spaces.value = (json.data ?? []) as Space[]
+  } catch (err) {
+    console.error('loadSpaces error:', err)
+  } finally {
+    spacesLoading.value = false
+  }
+}
+
+async function createSpace() {
+  const name = newSpaceName.value.trim()
+  if (!name) return
+  creatingSpace.value = true
+  try {
+    const res = await fetch('/api/spaces', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ name }),
+    })
+    const json = await res.json()
+    const space = json.data as Space | undefined
+    if (space) {
+      spaces.value.push(space)
+      newSpaceName.value = ''
+      enterSpace(space.id)
+    }
+  } catch (err) {
+    console.error('createSpace error:', err)
+  } finally {
+    creatingSpace.value = false
+  }
+}
+
+async function renameSpace(id: string) {
+  const name = renameSpaceInput.value.trim()
+  if (!name) { renamingSpaceId.value = null; return }
+  try {
+    const res = await fetch(`/api/spaces/${id}`, {
+      method: 'PUT',
+      headers: await authHeaders(),
+      body: JSON.stringify({ name }),
+    })
+    const json = await res.json()
+    const updated = json.data as Space | undefined
+    if (updated) {
+      const idx = spaces.value.findIndex(s => s.id === id)
+      if (idx !== -1) spaces.value[idx] = updated
+    }
+  } catch (err) {
+    console.error('renameSpace error:', err)
+  } finally {
+    renamingSpaceId.value = null
+    renameSpaceInput.value = ''
+  }
+}
+
+async function deleteSpace(id: string) {
+  try {
+    const res = await fetch(`/api/spaces/${id}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    })
+    if (res.ok) {
+      spaces.value = spaces.value.filter(s => s.id !== id)
+    }
+  } catch (err) {
+    console.error('deleteSpace error:', err)
+  }
+}
+
+function enterSpace(id: string) {
+  currentSpaceId.value = id
+  nodesMap.value.clear()
+  expanded.value.clear()
+  selected.value = null
+  isPreview.value = true
+  editContent.value = ''
+  currentView.value = 'workspace'
+  nextTick(() => loadRootNodes())
+}
+
+async function backToSpaces() {
+  // 离开前保存当前节点的 dirty 内容
+  if (selected.value) {
+    const node = nodesMap.value.get(selected.value)
+    if (node?.dirty) {
+      await saveNodeContent(selected.value, editContent.value, false)
+    }
+  }
+  currentView.value = 'spaces'
+  currentSpaceId.value = null
+  nodesMap.value.clear()
+  selected.value = null
+  editContent.value = ''
+}
+
 // init
-loadRootNodes()
+loadSpaces()
 
 type ContextMenu = {
   visible: boolean
@@ -640,7 +759,7 @@ async function commitRename(targetId: string, newTitle: string) {
   const newProps = { ...origProps, kind: inferred.kind }
 
   try {
-    const res = await fetch(`/api/nodes/${targetId}?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes/${targetId}?spaceId=${currentSpaceId.value}`, {
       method: 'PUT',
       headers: await authHeaders(),
       body: JSON.stringify({
@@ -681,7 +800,7 @@ async function deleteNode(targetId: string) {
   const orig = nodesMap.value.get(targetId)
   if (!orig) return
   try {
-    const res = await fetch(`/api/nodes/${targetId}?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes/${targetId}?spaceId=${currentSpaceId.value}`, {
       method: 'DELETE',
       headers: await authHeaders(),
     })
@@ -722,7 +841,7 @@ async function duplicateNode(targetId: string) {
     : (siblings[siblings.length - 1].sort_order ?? 0) + 1.0
 
   try {
-    const res = await fetch(`/api/nodes?spaceId=${SPACE_ID}`, {
+    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}`, {
       method: 'POST',
       headers: await authHeaders(),
       body: JSON.stringify({
@@ -758,12 +877,89 @@ async function duplicateNode(targetId: string) {
 </script>
 
 <template>
-  <main class="workspace">
+  <!-- ═══ Spaces 列表页 ═══ -->
+  <main v-if="currentView === 'spaces'" class="spaces-view">
+    <div class="spaces-container">
+      <header class="spaces-header">
+        <h1>My Workspaces</h1>
+        <p v-if="spaces.length" class="spaces-subtitle">Select a workspace or create a new one</p>
+      </header>
+
+      <p v-if="spacesLoading" class="spaces-loading">Loading...</p>
+
+      <div v-else class="spaces-grid">
+        <div
+          v-for="space in spaces"
+          :key="space.id"
+          class="space-card"
+          @click="enterSpace(space.id)"
+        >
+          <div class="space-card-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+          </div>
+          <input
+            v-if="renamingSpaceId === space.id"
+            v-model="renameSpaceInput"
+            class="space-rename-input"
+            @keydown.enter="renameSpace(space.id)"
+            @keydown.esc="renamingSpaceId = null"
+            @blur="renameSpace(space.id)"
+            @click.stop
+            autofocus
+          />
+          <div v-else class="space-card-name">{{ space.name }}</div>
+          <div class="space-card-date">{{ new Date(space.created_at).toLocaleDateString() }}</div>
+          <div class="space-card-actions" @click.stop>
+            <button
+              class="space-action-btn"
+              title="Rename"
+              @click="renamingSpaceId = space.id; renameSpaceInput = space.name"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button
+              class="space-action-btn space-action-btn--danger"
+              title="Delete"
+              @click="deleteSpace(space.id)"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Create card -->
+        <div v-if="!creatingSpace" class="space-card create-space-card" @click="creatingSpace = true">
+          <span class="create-space-plus">+</span>
+          <span>Create Workspace</span>
+        </div>
+        <div v-else class="space-card create-space-form" @click.stop>
+          <input
+            v-model="newSpaceName"
+            class="space-create-input"
+            placeholder="Workspace name..."
+            @keydown.enter="createSpace()"
+            @keydown.esc="creatingSpace = false; newSpaceName = ''"
+            autofocus
+          />
+          <div class="create-space-actions">
+            <button class="space-action-btn space-action-btn--primary" :disabled="!newSpaceName.trim()" @click="createSpace()">Create</button>
+            <button class="space-action-btn" @click="creatingSpace = false; newSpaceName = ''">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══ Workspace 视图(现有) ═══ -->
+  <main v-else-if="currentView === 'workspace'" class="workspace">
     <aside class="sidebar panel">
       <div class="panel-head">
         <div>
+          <button type="button" class="back-btn" title="Back to Spaces" @click="backToSpaces">←</button>
           <span class="eyebrow">Workspace</span>
-          <h1>workspace</h1>
+          <h1>{{ spaces.find(s => s.id === currentSpaceId)?.name || 'workspace' }}</h1>
         </div>
         <button type="button" class="icon-button">+</button>
       </div>
@@ -856,7 +1052,7 @@ async function duplicateNode(targetId: string) {
   </main>
 
   <!-- Context menu -->
-  <Teleport to="body">
+  <Teleport v-if="currentView === 'workspace'" to="body">
     <div v-if="contextMenu.visible" class="context-menu-backdrop" @click="hideContextMenu" @contextmenu.prevent="hideContextMenu">
       <ul class="context-menu" :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }" @click.stop>
         <li v-for="item in menuItems" :key="item.label" class="context-menu-item" @click="item.action(); hideContextMenu()">

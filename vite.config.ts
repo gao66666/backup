@@ -62,8 +62,8 @@ function localApiMock(): Plugin {
             const body = await readBody(req)
             const query = Object.fromEntries(new URL(req.url ?? '', 'http://x').searchParams)
             delete mockRequire.cache[mockRequire.resolve(file)]
-            const fn = mockRequire(file) as (ctx: { method?: string; body: unknown; query: Record<string, string> }) => { data?: unknown; error?: unknown; status?: number }
-            const out = fn({ method: req.method, body, query }) ?? {}
+            const fn = mockRequire(file) as (ctx: { method?: string; body: unknown; query: Record<string, string>; segments: string[] }) => { data?: unknown; error?: unknown; status?: number }
+            const out = fn({ method: req.method, body, query, segments }) ?? {}
             res.setHeader('Content-Type', 'application/json')
             if (out.error) {
               res.statusCode = out.status ?? 400

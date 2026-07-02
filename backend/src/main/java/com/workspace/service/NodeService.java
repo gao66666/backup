@@ -3,6 +3,7 @@ package com.workspace.service;
 import com.workspace.repository.NodeRepository;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -23,8 +24,8 @@ public class NodeService {
         RoleContext.requireAtLeast(Role.EDITOR);
         Map<String, Object> result = nodeRepository.insert(spaceId, parentId, type, title,
                 content, properties, caption, sortOrder, createdBy);
-        auditService.log("node.create", "node", (UUID) result.get("id"),
-                "{\"spaceId\":\"" + spaceId + "\",\"type\":\"" + type + "\"}");
+        auditService.log(spaceId, "node.create", "node", (UUID) result.get("id"),
+                "{\"type\":\"" + type + "\"}");
         return result;
     }
 
@@ -44,13 +45,13 @@ public class NodeService {
     }
 
     public Map<String, Object> update(UUID spaceId, UUID id, String title, String content, String properties,
-                                     String caption, Double sortOrder) {
+                                     String caption, Double sortOrder, UUID updatedBy) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        int n = nodeRepository.update(id, title, content, properties, caption, sortOrder);
+        int n = nodeRepository.update(id, title, content, properties, caption, sortOrder, updatedBy);
         if (n == 0) return null;
         Map<String, Object> fresh = nodeRepository.findById(id);
-        auditService.log("node.update", "node", id,
-                "{\"spaceId\":\"" + spaceId + "\"}");
+        auditService.log(spaceId, "node.update", "node", id,
+                "{}");
         return fresh;
     }
 
@@ -58,17 +59,17 @@ public class NodeService {
         RoleContext.requireAtLeast(Role.EDITOR);
         boolean deleted = nodeRepository.deleteById(id) > 0;
         if (deleted) {
-            auditService.log("node.delete", "node", id,
-                    "{\"spaceId\":\"" + spaceId + "\"}");
+            auditService.log(spaceId, "node.delete", "node", id,
+                    "{}");
         }
         return deleted;
     }
 
-    public boolean move(UUID spaceId, UUID nodeId, UUID newParentId, Double sortOrder) {
+    public boolean move(UUID spaceId, UUID nodeId, UUID newParentId, Double sortOrder, UUID updatedBy) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        boolean moved = nodeRepository.updateParentAndSort(nodeId, newParentId, sortOrder) > 0;
+        boolean moved = nodeRepository.updateParentAndSort(nodeId, newParentId, sortOrder, updatedBy) > 0;
         if (moved) {
-            auditService.log("node.move", "node", nodeId,
+            auditService.log(spaceId, "node.move", "node", nodeId,
                     "{\"spaceId\":\"" + spaceId + "\",\"newParentId\":\"" + newParentId + "\",\"sortOrder\":" + sortOrder + "}");
         }
         return moved;
@@ -101,5 +102,60 @@ public class NodeService {
             result.put("oldParent", nodeRepository.findByIdWithHasChildren(oldParentId));
         }
         return result;
+    }
+
+    /**
+     * 返回节点子树(嵌套 children JSON)。
+     */
+    public Map<String, Object> getTree(UUID nodeId, UUID spaceId) {
+        RoleContext.requireAtLeast(Role.VIEWER);
+
+        List<Map<String, Object>> flat = nodeRepository.findSubtree(nodeId, spaceId);
+        if (flat.isEmpty()) return null;
+
+        // 按 parent_id 分组
+        Map<UUID, List<Map<String, Object>>> byParent = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> node : flat) {
+            UUID parentId = (UUID) node.get("parent_id");
+            byParent.computeIfAbsent(parentId, k -> new java.util.ArrayList<>()).add(node);
+        }
+
+        // 递归构建树节点
+        return buildTreeNode(nodeId, byParent);
+    }
+
+    private Map<String, Object> buildTreeNode(UUID nodeId, Map<UUID, List<Map<String, Object>>> byParent) {
+        // 从 byParent 中找自身(根节点的 parent_id 是它自己要匹配的方式略有不同)
+        // 实际: findSubtree 返回所有节点,根节点在 flat 里,从 byParent 通过 null key 可以拿到根
+        // 但更简单的方式:从 flat 重建一个 node lookup map
+        for (var entry : byParent.entrySet()) {
+            for (var node : entry.getValue()) {
+                if (nodeId.equals(node.get("id"))) {
+                    return nodeToTree(node, byParent);
+                }
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> nodeToTree(Map<String, Object> node, Map<UUID, List<Map<String, Object>>> byParent) {
+        Map<String, Object> tree = new java.util.LinkedHashMap<>();
+        tree.put("id", node.get("id"));
+        tree.put("title", node.get("title"));
+        tree.put("type", node.get("type"));
+        tree.put("updated_at", node.get("updated_at"));
+        tree.put("updated_by", node.get("updated_by"));
+        tree.put("caption", node.get("caption"));
+
+        UUID nodeId = (UUID) node.get("id");
+        List<Map<String, Object>> childList = byParent.getOrDefault(nodeId, java.util.Collections.emptyList());
+        List<Map<String, Object>> children = new java.util.ArrayList<>();
+        for (Map<String, Object> child : childList) {
+            children.add(nodeToTree(child, byParent));
+        }
+        tree.put("children", children);
+
+        return tree;
     }
 }

@@ -15,7 +15,8 @@ CREATE TABLE nodes (
     deleted_at TIMESTAMPTZ,                                           -- 删除时间
     created_by UUID NOT NULL,                                         -- 创建者用户ID
     created_at TIMESTAMPTZ DEFAULT now(),                             -- 创建时间
-    updated_at TIMESTAMPTZ DEFAULT now()                              -- 更新时间
+    updated_at TIMESTAMPTZ DEFAULT now(),                             -- 更新时间
+    updated_by UUID                                                   -- 最后修改者(用户或agent)
 );
 
 -- 树形结构索引：按 space_id + parent_id + sort_order 排序

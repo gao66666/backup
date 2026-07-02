@@ -1,5 +1,6 @@
 package com.workspace.controller;
 
+import com.workspace.service.AuditService;
 import com.workspace.service.NodeService;
 import com.workspace.service.RoleContext;
 import com.workspace.util.AuthService;
@@ -15,10 +16,12 @@ import java.util.UUID;
 public class NodeController {
 
     private final NodeService nodeService;
+    private final AuditService auditService;
     private final AuthService authService;
 
-    public NodeController(NodeService nodeService, AuthService authService) {
+    public NodeController(NodeService nodeService, AuditService auditService, AuthService authService) {
         this.nodeService = nodeService;
+        this.auditService = auditService;
         this.authService = authService;
     }
 
@@ -57,6 +60,30 @@ public class NodeController {
         return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
+    @GetMapping("/{id}/tree")
+    public ResponseEntity<?> getTree(@PathVariable UUID id, @RequestParam UUID spaceId) {
+        Map<String, Object> result = nodeService.getTree(id, spaceId);
+        if (result == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(ApiResponse.ok(result));
+    }
+
+    @GetMapping("/{id}/history")
+    public ResponseEntity<?> getHistory(@PathVariable UUID id,
+                                         @RequestParam UUID spaceId,
+                                         @RequestParam(defaultValue = "1") int page,
+                                         @RequestParam(defaultValue = "20") int size) {
+        java.util.List<java.util.Map<String, Object>> items = auditService.findByNode(id, page, size);
+        int total = auditService.countByNode(id);
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("items", items);
+        result.put("total", total);
+        result.put("page", page);
+        result.put("size", size);
+        return ResponseEntity.ok(ApiResponse.ok(result));
+    }
+
     @PutMapping("/{id}")
     public ResponseEntity<?> update(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
         UUID spaceId = RoleContext.current().spaceId();
@@ -66,7 +93,8 @@ public class NodeController {
         String caption = (String) body.get("caption");
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
 
-        Map<String, Object> updated = nodeService.update(spaceId, id, title, content, properties, caption, sortOrder);
+        Map<String, Object> updated = nodeService.update(spaceId, id, title, content, properties, caption, sortOrder,
+                authService.getCurrentUserId());
         if (updated == null) {
             return ResponseEntity.notFound().build();
         }
@@ -100,7 +128,7 @@ public class NodeController {
         if (before == null) return ResponseEntity.notFound().build();
         UUID oldParentId = (UUID) before.get("parent_id");
 
-        boolean moved = nodeService.move(spaceId, id, newParentId, sortOrder);
+        boolean moved = nodeService.move(spaceId, id, newParentId, sortOrder, authService.getCurrentUserId());
         if (!moved) return ResponseEntity.notFound().build();
 
         // 返回 movedNode + oldParent + newParent,让前端一次性更新三处 has_children

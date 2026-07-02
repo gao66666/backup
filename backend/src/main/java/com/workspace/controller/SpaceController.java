@@ -1,5 +1,6 @@
 package com.workspace.controller;
 
+import com.workspace.service.AuditService;
 import com.workspace.service.SpaceService;
 import com.workspace.util.AuthService;
 import org.springframework.http.ResponseEntity;
@@ -13,10 +14,12 @@ import java.util.UUID;
 public class SpaceController {
 
     private final SpaceService spaceService;
+    private final AuditService auditService;
     private final AuthService authService;
 
-    public SpaceController(SpaceService spaceService, AuthService authService) {
+    public SpaceController(SpaceService spaceService, AuditService auditService, AuthService authService) {
         this.spaceService = spaceService;
+        this.auditService = auditService;
         this.authService = authService;
     }
 
@@ -25,7 +28,7 @@ public class SpaceController {
         UUID ownerId = authService.getCurrentUserId();
         String name = (String) body.get("name");
         return ResponseEntity.ok(ApiResponse.ok(
-                spaceService.create(name, ownerId, null)));
+                spaceService.create(name, ownerId)));
     }
 
     @GetMapping
@@ -52,6 +55,28 @@ public class SpaceController {
             return ResponseEntity.notFound().build();
         }
         return ResponseEntity.ok(ApiResponse.ok(spaceService.getById(id)));
+    }
+
+    @GetMapping("/{id}/activity")
+    public ResponseEntity<?> getActivity(@PathVariable UUID id,
+                                          @RequestParam(defaultValue = "1") int page,
+                                          @RequestParam(defaultValue = "20") int size,
+                                          @RequestParam(required = false) UUID userId) {
+        java.util.List<java.util.Map<String, Object>> items;
+        int total;
+        if (userId != null) {
+            items = auditService.findByUser(userId, id, page, size);
+            total = auditService.countByUser(userId, id);
+        } else {
+            items = auditService.findBySpace(id, page, size);
+            total = auditService.countBySpace(id);
+        }
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("items", items);
+        result.put("total", total);
+        result.put("page", page);
+        result.put("size", size);
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
     @DeleteMapping("/{id}")

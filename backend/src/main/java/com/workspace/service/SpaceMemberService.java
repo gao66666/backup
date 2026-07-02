@@ -23,7 +23,7 @@ public class SpaceMemberService {
         RoleContext.requireAtLeast(Role.ADMIN);
         Record record = spaceMemberRepository.insert(spaceId, userId, role);
         Map<String, Object> result = record.intoMap();
-        auditService.log("member.add", "member", (UUID) result.get("id"),
+        auditService.log(spaceId, "member.add", "member", (UUID) result.get("id"),
                 "{\"spaceId\":\"" + spaceId + "\",\"userId\":\"" + userId + "\",\"role\":\"" + role + "\"}");
         return result;
     }
@@ -56,7 +56,7 @@ public class SpaceMemberService {
         UUID targetUserId = existing.get(field("user_id", UUID.class));
         boolean updated = spaceMemberRepository.update(id, role) > 0;
         if (updated) {
-            auditService.log("member.update", "member", id,
+            auditService.log(spaceId, "member.update", "member", id,
                     "{\"spaceId\":\"" + spaceId + "\",\"userId\":\"" + targetUserId + "\",\"role\":\"" + role + "\"}");
         }
         return updated;
@@ -70,7 +70,7 @@ public class SpaceMemberService {
         UUID targetUserId = existing.get(field("user_id", UUID.class));
         boolean deleted = spaceMemberRepository.deleteById(id) > 0;
         if (deleted) {
-            auditService.log("member.remove", "member", id,
+            auditService.log(spaceId, "member.remove", "member", id,
                     "{\"spaceId\":\"" + spaceId + "\",\"userId\":\"" + targetUserId + "\"}");
         }
         return deleted;

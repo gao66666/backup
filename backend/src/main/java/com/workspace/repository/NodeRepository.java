@@ -29,7 +29,20 @@ public class NodeRepository {
     public Map<String, Object> insert(UUID spaceId, UUID parentId, String type, String title,
                                      String content, String properties, String caption,
                                      Double sortOrder, UUID createdBy) {
-        UUID id = UUID.randomUUID();
+        return insert(UUID.randomUUID(), spaceId, parentId, type, title, content, properties, caption, sortOrder, createdBy, createdBy);
+    }
+
+    /** 支持指定节点 ID(空间创建时需预生成 rootNodeId) */
+    public Map<String, Object> insert(UUID id, UUID spaceId, UUID parentId, String type, String title,
+                                     String content, String properties, String caption,
+                                     Double sortOrder, UUID createdBy) {
+        return insert(id, spaceId, parentId, type, title, content, properties, caption, sortOrder, createdBy, createdBy);
+    }
+
+    /** 完整参数，含 updatedBy（agent/用户） */
+    public Map<String, Object> insert(UUID id, UUID spaceId, UUID parentId, String type, String title,
+                                     String content, String properties, String caption,
+                                     Double sortOrder, UUID createdBy, UUID updatedBy) {
         OffsetDateTime now = OffsetDateTime.now();
 
         db.insertInto(table("nodes"),
@@ -44,13 +57,14 @@ public class NodeRepository {
                         field("sort_order", Double.class),
                         field("is_deleted", Boolean.class),
                         field("created_by", UUID.class),
+                        field("updated_by", UUID.class),
                         field("created_at", OffsetDateTime.class),
                         field("updated_at", OffsetDateTime.class))
                 .values(id, spaceId, parentId, type, title,
                         cast(content != null ? content : "{}", SQLDataType.JSONB),
                         cast(properties != null ? properties : "{}", SQLDataType.JSONB),
                         caption, sortOrder != null ? sortOrder : 0.0,
-                        false, createdBy, now, now)
+                        false, createdBy, updatedBy, now, now)
                 .execute();
 
         return findById(id);
@@ -82,14 +96,36 @@ public class NodeRepository {
                 .fetch(r -> recordToMap(r));
     }
 
+    /**
+     * 递归查子树(含自身): WITH RECURSIVE 从目标节点出发,逐层拿所有子孙。
+     * 结果按 parent_id + sort_order 排序,方便在 service 层组装树。
+     */
+    public List<Map<String, Object>> findSubtree(UUID nodeId, UUID spaceId) {
+        String sql = """
+            WITH RECURSIVE subtree AS (
+              SELECT n.* FROM nodes n
+              WHERE n.id = ? AND n.space_id = ? AND n.is_deleted = false
+              UNION ALL
+              SELECT n.* FROM nodes n
+              JOIN subtree s ON n.parent_id = s.id
+              WHERE n.is_deleted = false
+            )
+            SELECT * FROM subtree ORDER BY parent_id NULLS FIRST, sort_order ASC
+            """;
+        return db.fetch(sql, nodeId, spaceId).stream()
+                .map(this::recordToMap)
+                .collect(Collectors.toList());
+    }
+
     public int update(UUID id, String title, String content, String properties,
-                      String caption, Double sortOrder) {
+                      String caption, Double sortOrder, UUID updatedBy) {
         return db.update(table("nodes"))
                 .set(field("title", String.class), title)
                 .set(field("content", SQLDataType.JSONB), content != null ? cast(content, SQLDataType.JSONB) : null)
                 .set(field("properties", SQLDataType.JSONB), properties != null ? cast(properties, SQLDataType.JSONB) : null)
                 .set(field("caption", String.class), caption)
                 .set(field("sort_order", Double.class), sortOrder)
+                .set(field("updated_by", UUID.class), updatedBy)
                 .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
                 .where(field("id", UUID.class).eq(id))
                 .execute();
@@ -128,10 +164,11 @@ public class NodeRepository {
         }
     }
 
-    public int updateParentAndSort(UUID id, UUID newParentId, Double sortOrder) {
+    public int updateParentAndSort(UUID id, UUID newParentId, Double sortOrder, UUID updatedBy) {
         return db.update(table("nodes"))
                 .set(field("parent_id", UUID.class), newParentId)
                 .set(field("sort_order", Double.class), sortOrder)
+                .set(field("updated_by", UUID.class), updatedBy)
                 .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
                 .where(field("id", UUID.class).eq(id))
                 .execute();
