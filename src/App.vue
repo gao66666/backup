@@ -1,9 +1,40 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import FileTreeItem from './components/FileTreeItem.vue'
-import { useMarkdown } from './composables/useMarkdown'
+import { useMarkdown, type ResolvedNode } from './composables/useMarkdown'
 
-const { render } = useMarkdown()
+// 工作空间路径解析器(注入 useMarkdown)。返回节点完整信息或 null。
+// 如果路径中某层 collection 的子节点尚未懒加载,触发加载后返回 null;加载完成后 Vue 自动重渲染。
+function resolveNodeByPath(path: string): ResolvedNode | null {
+  const clean = path.replace(/^\/workspace\/?/, '')
+  if (!clean) return null
+  const segments = clean.split('/')
+  let parentId: string | null = null
+  const allNodes = [...nodesMap.value.values()]
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    const isLast = i === segments.length - 1
+    const found = allNodes.find(n => n.parent_id === parentId && n.title === seg)
+    if (!found) {
+      if (parentId) {
+        const parent = allNodes.find(n => n.id === parentId)
+        if (parent?.has_children) loadChildren(parentId)
+      }
+      return null
+    }
+    if (isLast) {
+      return { id: found.id, type: found.type, src: getNodeSrc(found.id) }
+    }
+    if (found.has_children && !allNodes.some(n => n.parent_id === found.id)) {
+      loadChildren(found.id)
+      return null
+    }
+    parentId = found.id
+  }
+  return null
+}
+
+const { render } = useMarkdown(resolveNodeByPath)
 
 const SPACE_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -55,6 +86,7 @@ function onDragOver(nodeId: string, e: DragEvent) {
 
 function onDrop(targetId: string, e: DragEvent) {
   e.preventDefault()
+  e.stopPropagation()  // 防止冒泡到 root ul 触发 onDropRoot 造成双重移动
   const draggedId = e.dataTransfer?.getData('text/plain') || draggingId.value
   if (!draggedId || draggedId === targetId) {
     draggingId.value = null
@@ -67,6 +99,87 @@ function onDrop(targetId: string, e: DragEvent) {
   nodeService.move(SPACE_ID, draggedId, targetId, sortOrder)
   draggingId.value = null
   dropTargetId.value = null
+}
+
+function onDragOverRoot(e: DragEvent) {
+  e.preventDefault()
+  // 只在鼠标真的悬停在根 ul 空白区域时才标识为 root drop;
+  // 子节点冒泡上来的 dragover 忽略(它们的 onDragOver 已设 dropTargetId)。
+  if (e.target === e.currentTarget) {
+    dropTargetId.value = null
+  }
+}
+
+function onDropRoot(e: DragEvent) {
+  e.preventDefault()
+  const draggedId = e.dataTransfer?.getData('text/plain') || draggingId.value
+  if (!draggedId) {
+    draggingId.value = null
+    dropTargetId.value = null
+    return
+  }
+  // Drop to root:排到根节点末尾
+  const rootNodes = [...nodesMap.value.values()]
+    .filter(n => n.parent_id === null)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  const sortOrder = rootNodes.length === 0
+    ? 1.0
+    : (rootNodes[rootNodes.length - 1].sort_order ?? 0) + 1.0
+  nodeService.move(SPACE_ID, draggedId, null, sortOrder)
+  draggingId.value = null
+  dropTargetId.value = null
+}
+
+// ── 拖文件到编辑区 → 自动插入 markdown/HTML 语法 ──
+function onEditorDragOver(e: DragEvent) {
+  e.preventDefault()
+}
+
+function onEditorDrop(e: DragEvent) {
+  e.preventDefault()
+  const nodeId = e.dataTransfer?.getData('text/plain') || draggingId.value
+  if (!nodeId) return
+  const node = nodesMap.value.get(nodeId)
+  if (!node || node.type === 'collection') return
+
+  const path = getNodePath(nodeId)
+  let syntax: string
+  if (node.type === 'image') {
+    syntax = `![${node.title}](${path})`
+  } else if (node.type === 'video') {
+    syntax = `<video src="${path}" controls></video>`
+  } else if (node.type === 'audio') {
+    syntax = `<audio src="${path}" controls></audio>`
+  } else {
+    syntax = `[${node.title}](${path})`
+  }
+
+  const textarea = document.querySelector('.editor-textarea') as HTMLTextAreaElement | null
+  if (!textarea) return
+  const start = textarea.selectionStart
+  const before = editContent.value.substring(0, start)
+  const after = editContent.value.substring(start)
+  const block = node.type === 'video' || node.type === 'audio' ? '\n' : ''
+  editContent.value = before + block + syntax + block + after
+  nextTick(() => {
+    const pos = start + block.length + syntax.length + block.length
+    textarea.setSelectionRange(pos, pos)
+    textarea.focus()
+  })
+  draggingId.value = null
+  dropTargetId.value = null
+}
+
+// ── Preview 中点击内部导航链接(指向 md/doc 等节点) → 跳转到该节点 ──
+function onPreviewClick(e: MouseEvent) {
+  const link = (e.target as HTMLElement).closest('[data-workspace-node]')
+  if (!link) return
+  e.preventDefault()
+  const nodeId = link.getAttribute('data-workspace-node')
+  if (nodeId) {
+    selected.value = nodeId
+    isPreview.value = true
+  }
 }
 
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -272,7 +385,7 @@ async function createNode(placeholderName: string, parentIdOverride?: string) {
 }
 
 const nodeService = {
-  async move(spaceId: string, nodeId: string, newParentId: string, sortOrder: number) {
+  async move(spaceId: string, nodeId: string, newParentId: string | null, sortOrder: number) {
     const res = await fetch(`/api/nodes/${nodeId}/move?spaceId=${spaceId}`, {
       method: 'PATCH',
       headers: await authHeaders(),
@@ -291,7 +404,7 @@ const nodeService = {
 }
 
 watch(selected, (nodeId: string | null) => {
-  isPreview.value = false
+  isPreview.value = true
   loadingContent.value = true   // 保护:下面给 editContent 赋值不会触发 watch 误标 dirty
   if (nodeId) {
     const node = nodesMap.value.get(nodeId)
@@ -407,7 +520,14 @@ async function saveNodeContent(nodeId: string, content: string, showFeedback = t
 }
 
 function getRootNodes(): ApiNode[] {
-  return [...nodesMap.value.values()].filter(n => n.parent_id === null)
+  return [...nodesMap.value.values()]
+    .filter(n => n.parent_id === null)
+    .sort((a, b) => {
+      const aIsFolder = a.type === 'collection' ? 0 : 1
+      const bIsFolder = b.type === 'collection' ? 0 : 1
+      if (aIsFolder !== bIsFolder) return aIsFolder - bIsFolder
+      return a.title.localeCompare(b.title)
+    })
 }
 
 function getNodeSrc(nodeId: string): string {
@@ -668,7 +788,7 @@ async function duplicateNode(targetId: string) {
           <input ref="fileInputRef" type="file" multiple style="display:none" @change="onFileSelected">
         </div>
         <p v-if="loading" class="tree-loading">Loading...</p>
-        <ul v-else class="tree-root">
+        <ul v-else class="tree-root" @dragover.prevent="onDragOverRoot" @drop="onDropRoot">
           <FileTreeItem
             v-for="node in getRootNodes()"
             :key="node.id"
@@ -725,8 +845,10 @@ async function duplicateNode(targetId: string) {
               v-model="editContent"
               class="editor-textarea"
               placeholder="Write markdown here..."
+              @dragover.prevent="onEditorDragOver"
+              @drop="onEditorDrop"
             ></textarea>
-            <div v-else class="text-editor" v-html="render(editContent)"></div>
+            <div v-else class="text-editor" v-html="render(editContent)" @click="onPreviewClick"></div>
           </template>
         </article>
       </section>

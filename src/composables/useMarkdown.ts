@@ -1,56 +1,89 @@
 import MarkdownIt from 'markdown-it'
 
-const md = new MarkdownIt({
-  html: true,
-  linkify: true,
-  typographer: true,
-})
-
-// Intercept link_open to handle @[video](url) and @[audio](url) syntax
-const defaultRender = md.renderer.rules.link_open || function (tokens, idx, options, _env, self) {
-  return self.renderToken(tokens, idx, options)
+export interface ResolvedNode {
+  id: string
+  type: string   // 'image' | 'video' | 'audio' | 'doc' | 'collection'
+  src: string    // MinIO presigned URL, 非上传文件为空
 }
 
-md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
-  const href = tokens[idx].attrGet('href')
-  if (!href) return defaultRender(tokens, idx, options, env, self)
+/**
+ * 工作空间路径解析器。
+ * 入参:用户写的路径,如 `/workspace/folder/file.pdf`
+ * 返回:节点信息或 null
+ */
+export type NodeResolver = (path: string) => ResolvedNode | null
 
-  // @[video](url) -> <video>
-  const videoMatch = href.match(/^@\[video\]\((.+)\)$/)
-  if (videoMatch) {
-    return `<video src="${videoMatch[1]}" controls playsinline style="width:100%;border-radius:8px;margin:8px 0;"></video>`
+export function useMarkdown(resolveNode?: NodeResolver) {
+  const md = new MarkdownIt({
+    html: true,
+    linkify: true,
+    typographer: true,
+  })
+
+  // ── link_open ──
+  const defaultLinkRender = md.renderer.rules.link_open || function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
   }
 
-  // @[audio](url) -> <audio>
-  const audioMatch = href.match(/^@\[audio\]\((.+)\)$/)
-  if (audioMatch) {
-    return `<audio src="${audioMatch[1]}" controls style="width:100%;margin:8px 0;"></audio>`
+  md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
+    const href = tokens[idx].attrGet('href')
+    if (!href || /^https?:\/\//.test(href) || !resolveNode) {
+      return defaultLinkRender(tokens, idx, options, env, self)
+    }
+    const node = resolveNode(href)
+    if (!node) return defaultLinkRender(tokens, idx, options, env, self)
+
+    if (node.type === 'image' || node.type === 'video' || node.type === 'audio') {
+      if (node.src) tokens[idx].attrSet('href', node.src)
+      return defaultLinkRender(tokens, idx, options, env, self)
+    }
+
+    // doc / collection / 其他:标记为内部导航链接
+    tokens[idx].attrSet('data-workspace-node', node.id)
+    return defaultLinkRender(tokens, idx, options, env, self)
   }
 
-  // @[file](url) -> file card
-  const fileMatch = href.match(/^@\[file\]\((.+)\)$/)
-  if (fileMatch) {
-    const url = fileMatch[1]
-    const filename = url.split('/').pop() || 'file'
-    return `<a href="${url}" target="_blank" style="display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1px solid var(--color-border-subtle);background:var(--color-surface-panel);color:var(--color-ink-secondary);text-decoration:none;margin:4px 0;font-size:0.9rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-      <span>${filename}</span>
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-    </a>`
+  // ── image: ![alt](path) ──
+  const defaultImageRender = md.renderer.rules.image || function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
   }
 
-  return defaultRender(tokens, idx, options, env, self)
-}
+  md.renderer.rules.image = function (tokens, idx, options, env, self) {
+    const src = tokens[idx].attrGet('src')
+    if (src && !/^https?:\/\//.test(src) && resolveNode) {
+      const node = resolveNode(src)
+      if (node?.src) tokens[idx].attrSet('src', node.src)
+    }
+    return defaultImageRender(tokens, idx, options, env, self)
+  }
 
-export function useMarkdown() {
+  // ── 后处理:原始 HTML <video>/<audio> src ──
+  function resolveHtmlMediaSrc(html: string): string {
+    if (!resolveNode) return html
+    return html.replace(/(<(?:video|audio)\b[^>]*?\s)src="([^"]+)("[^>]*>)/gi, (match, before, src, after) => {
+      if (/^https?:\/\//.test(src)) return match
+      const node = resolveNode(src)
+      if (node?.src) return before + 'src="' + node.src + after
+      return match
+    })
+  }
+
+  // ── 后处理:内部导航链接 href → # ──
+  function resolveInternalLinks(html: string): string {
+    return html.replace(/ href="[^"]*" data-workspace-node="([^"]+)"/g, ' href="#" data-workspace-node="$1"')
+  }
+
   function render(content: string): string {
     if (!content) return ''
+    let text: string
     try {
       const obj = JSON.parse(content)
-      return md.render(obj.text || content)
+      text = obj.text || content
     } catch {
-      return md.render(content)
+      text = content
     }
+    const raw = md.render(text)
+    return resolveInternalLinks(resolveHtmlMediaSrc(raw))
   }
 
   return { render }

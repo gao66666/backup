@@ -242,6 +242,9 @@ h3 {
 .tree-root {
   display: grid;
   gap: 2px;
+  flex: 1;
+  min-height: 80px;
+  align-content: start;
 }
 
 .node-rename-input {

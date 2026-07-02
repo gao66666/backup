@@ -39,3 +39,4 @@ out/
 
 # Claude 本地配置(memory / 权限白名单 / 项目规范)只在本机留存,不进仓库
 .claude/
+.playwright-cli/

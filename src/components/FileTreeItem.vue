@@ -32,7 +32,14 @@ const emit = defineEmits<{
 }>()
 
 function getChildren(parentId: string, nodesMap: Map<string, ApiNode>): ApiNode[] {
-  return [...nodesMap.values()].filter(n => n.parent_id === parentId)
+  return [...nodesMap.values()]
+    .filter(n => n.parent_id === parentId)
+    .sort((a, b) => {
+      const aIsFolder = a.type === 'collection' ? 0 : 1
+      const bIsFolder = b.type === 'collection' ? 0 : 1
+      if (aIsFolder !== bIsFolder) return aIsFolder - bIsFolder
+      return a.title.localeCompare(b.title)
+    })
 }
 
 const isRenaming = computed(() => props.renameTargetId === props.node.id)
