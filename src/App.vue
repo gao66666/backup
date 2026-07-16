@@ -1,40 +1,61 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import CollaborativeEditor from './components/CollaborativeEditor.vue'
 import FileTreeItem from './components/FileTreeItem.vue'
-import { useMarkdown, type ResolvedNode } from './composables/useMarkdown'
+import {
+  connectWorkspaceEvents,
+  workspaceEventsEnabled,
+  type WorkspaceEventsConnection,
+  type WorkspaceNode,
+  type WorkspaceNodeEvent,
+} from './services/workspaceEvents'
 
-// 工作空间路径解析器(注入 useMarkdown)。返回节点完整信息或 null。
-// 如果路径中某层 collection 的子节点尚未懒加载,触发加载后返回 null;加载完成后 Vue 自动重渲染。
-function resolveNodeByPath(path: string): ResolvedNode | null {
+type ResolvedWorkspaceNode = {
+  id: string
+  type: string
+  src: string
+}
+
+// Milkdown 中的 /workspace/... 链接和媒体地址需要按需加载文件树后再解析。
+async function resolveNodeByPath(path: string): Promise<ResolvedWorkspaceNode | null> {
   const clean = path.replace(/^\/workspace\/?/, '')
   if (!clean) return null
   const segments = clean.split('/')
   let parentId: string | null = null
-  const allNodes = [...nodesMap.value.values()]
+
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i]
     const isLast = i === segments.length - 1
-    const found = allNodes.find(n => n.parent_id === parentId && n.title === seg)
+    let found = [...nodesMap.value.values()]
+      .find(n => n.parent_id === parentId && n.title === seg)
+
     if (!found) {
       if (parentId) {
-        const parent = allNodes.find(n => n.id === parentId)
-        if (parent?.has_children) loadChildren(parentId)
+        const parent = nodesMap.value.get(parentId)
+        if (parent?.has_children) {
+          await loadChildren(parentId)
+          found = [...nodesMap.value.values()]
+            .find(n => n.parent_id === parentId && n.title === seg)
+        }
       }
-      return null
+      if (!found) return null
     }
+
     if (isLast) {
       return { id: found.id, type: found.type, src: getNodeSrc(found.id) }
     }
-    if (found.has_children && !allNodes.some(n => n.parent_id === found.id)) {
-      loadChildren(found.id)
-      return null
+
+    if (
+      found.has_children
+      && ![...nodesMap.value.values()].some(n => n.parent_id === found.id)
+    ) {
+      await loadChildren(found.id)
     }
     parentId = found.id
   }
+
   return null
 }
-
-const { render } = useMarkdown(resolveNodeByPath)
 
 // ── 视图切换 ──
 const currentView = ref<'spaces' | 'workspace'>('spaces')
@@ -55,16 +76,7 @@ const newSpaceName = ref('')
 const renamingSpaceId = ref<string | null>(null)
 const renameSpaceInput = ref('')
 
-type ApiNode = {
-  id: string
-  title: string
-  type: string
-  parent_id: string | null
-  has_children: boolean
-  content?: string
-  properties?: string
-  caption?: string | null
-  sort_order?: number
+type ApiNode = WorkspaceNode & {
   dirty?: boolean   // 本地未保存标记,不入后端
 }
 
@@ -72,11 +84,58 @@ const nodesMap = ref<Map<string, ApiNode>>(new Map())
 const expanded = ref(new Set<string>())
 const selected = ref<string | null>(null)
 const renamingId = ref<string | null>(null)   // 当前正在重命名的节点 ID(FileTreeItem 据此切 input)
+
+type CollaborativeEditorHandle = {
+  getMarkdown: () => string
+  insertMarkdown: (markdown: string, inline?: boolean) => void
+  focus: () => void
+}
+const editorRef = ref<CollaborativeEditorHandle | null>(null)
+
+// ── 标签页 ──
+type OpenTab = { id: string; title: string; type: string }
+const openTabs = ref<OpenTab[]>([])
+
+function openTab(nodeId: string) {
+  const node = nodesMap.value.get(nodeId)
+  if (!node || node.type === 'collection') return
+  if (!openTabs.value.find(t => t.id === nodeId)) {
+    openTabs.value.push({ id: node.id, title: node.title, type: node.type })
+  }
+  selected.value = nodeId
+}
+
+function closeTab(nodeId: string) {
+  const idx = openTabs.value.findIndex(t => t.id === nodeId)
+  if (idx === -1) return
+
+  if (selected.value === nodeId) {
+    const latestContent = syncActiveEditorContent()
+    const node = nodesMap.value.get(nodeId)
+    if (node?.dirty) {
+      void saveNodeContent(nodeId, latestContent, false)
+    }
+  }
+
+  openTabs.value.splice(idx, 1)
+  if (selected.value === nodeId) {
+    // 切到相邻标签，没有则清空编辑区
+    const next = openTabs.value[idx] || openTabs.value[idx - 1]
+    selected.value = next?.id ?? null
+  }
+}
 const loading = ref(false)
-const isPreview = ref(false)
 const editContent = ref('')
 const savingNow = ref(false)               // 保存进行中(按钮 disabled 用)
 const loadingContent = ref(false)          // 程序设置 editContent 时为 true(watch(editContent) 跳过,避免误标 dirty)
+
+function syncActiveEditorContent(): string {
+  const latestContent = editorRef.value?.getMarkdown() ?? editContent.value
+  if (latestContent !== editContent.value) {
+    editContent.value = latestContent
+  }
+  return latestContent
+}
 
 // 监听 editContent 变化,标记 dirty(直接 Map.set 不比较)
 watch(editContent, () => {
@@ -93,6 +152,7 @@ const dropTargetId = ref<string | null>(null)
 
 function onDragStart(nodeId: string, e: DragEvent) {
   draggingId.value = nodeId
+  e.dataTransfer?.setData('application/x-workspace-node', nodeId)
   e.dataTransfer?.setData('text/plain', nodeId)
 }
 
@@ -148,17 +208,15 @@ function onDropRoot(e: DragEvent) {
   dropTargetId.value = null
 }
 
-// ── 拖文件到编辑区 → 自动插入 markdown/HTML 语法 ──
-function onEditorDragOver(e: DragEvent) {
-  e.preventDefault()
-}
-
+// ── 拖文件到编辑区 → 在 Milkdown 当前光标处插入 Markdown/HTML ──
 function onEditorDrop(e: DragEvent) {
-  e.preventDefault()
-  const nodeId = e.dataTransfer?.getData('text/plain') || draggingId.value
+  const nodeId = e.dataTransfer?.getData('application/x-workspace-node')
+    || e.dataTransfer?.getData('text/plain')
+    || draggingId.value
   if (!nodeId) return
   const node = nodesMap.value.get(nodeId)
   if (!node || node.type === 'collection') return
+  e.preventDefault()
 
   const path = getNodePath(nodeId)
   let syntax: string
@@ -172,32 +230,20 @@ function onEditorDrop(e: DragEvent) {
     syntax = `[${node.title}](${path})`
   }
 
-  const textarea = document.querySelector('.editor-textarea') as HTMLTextAreaElement | null
-  if (!textarea) return
-  const start = textarea.selectionStart
-  const before = editContent.value.substring(0, start)
-  const after = editContent.value.substring(start)
-  const block = node.type === 'video' || node.type === 'audio' ? '\n' : ''
-  editContent.value = before + block + syntax + block + after
-  nextTick(() => {
-    const pos = start + block.length + syntax.length + block.length
-    textarea.setSelectionRange(pos, pos)
-    textarea.focus()
-  })
+  editorRef.value?.insertMarkdown(syntax, true)
   draggingId.value = null
   dropTargetId.value = null
 }
 
-// ── Preview 中点击内部导航链接(指向 md/doc 等节点) → 跳转到该节点 ──
-function onPreviewClick(e: MouseEvent) {
-  const link = (e.target as HTMLElement).closest('[data-workspace-node]')
-  if (!link) return
-  e.preventDefault()
-  const nodeId = link.getAttribute('data-workspace-node')
-  if (nodeId) {
-    selected.value = nodeId
-    isPreview.value = true
-  }
+async function onEditorNavigate(path: string) {
+  const node = await resolveNodeByPath(path)
+  if (node) handleSelect(node.id)
+}
+
+async function resolveEditorMedia(path: string): Promise<string> {
+  if (!path.startsWith('/workspace')) return path
+  const node = await resolveNodeByPath(path)
+  return node?.src || path
 }
 
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -346,6 +392,280 @@ async function authHeaders(): Promise<HeadersInit> {
   }
 }
 
+let workspaceEventsConnection: WorkspaceEventsConnection | null = null
+let workspaceEventsGeneration = 0
+let workspaceTreeEventVersion = 0
+const seenWorkspaceEventIds = new Set<string>()
+
+function rememberWorkspaceEvent(eventId: string): boolean {
+  if (seenWorkspaceEventIds.has(eventId)) return false
+  seenWorkspaceEventIds.add(eventId)
+  if (seenWorkspaceEventIds.size > 512) {
+    const oldest = seenWorkspaceEventIds.values().next().value
+    if (oldest) seenWorkspaceEventIds.delete(oldest)
+  }
+  return true
+}
+
+function mergeNodeIntoMap(target: Map<string, ApiNode>, incoming: WorkspaceNode) {
+  const existing = target.get(incoming.id)
+  const merged: ApiNode = {
+    ...existing,
+    ...incoming,
+  }
+  if (existing?.dirty) {
+    merged.dirty = true
+    merged.content = existing.content
+  }
+  target.set(incoming.id, merged)
+}
+
+function syncOpenTabsFromNodes() {
+  openTabs.value = openTabs.value.map((tab) => {
+    const node = nodesMap.value.get(tab.id)
+    return node
+      ? { id: node.id, title: node.title, type: node.type }
+      : tab
+  })
+}
+
+function collectSubtreeIds(
+  rootId: string,
+  source: Map<string, ApiNode>,
+): Set<string> {
+  const result = new Set<string>()
+  const pending = [rootId]
+  while (pending.length) {
+    const current = pending.pop()!
+    if (result.has(current)) continue
+    result.add(current)
+    for (const node of source.values()) {
+      if (node.parent_id === current) pending.push(node.id)
+    }
+  }
+  return result
+}
+
+function removeNodeIdsFromUi(removedIds: Set<string>) {
+  if (!removedIds.size) return
+
+  const selectedTabIndex = selected.value
+    ? openTabs.value.findIndex(tab => tab.id === selected.value)
+    : -1
+  openTabs.value = openTabs.value.filter(tab => !removedIds.has(tab.id))
+
+  const nextExpanded = new Set(expanded.value)
+  removedIds.forEach(id => nextExpanded.delete(id))
+  expanded.value = nextExpanded
+
+  if (renamingId.value && removedIds.has(renamingId.value)) {
+    renamingId.value = null
+  }
+
+  if (selected.value && removedIds.has(selected.value)) {
+    const nextIndex = Math.min(
+      Math.max(selectedTabIndex, 0),
+      openTabs.value.length - 1,
+    )
+    selected.value = nextIndex >= 0 ? openTabs.value[nextIndex]?.id ?? null : null
+  }
+}
+
+function removeNodeSubtree(rootId: string) {
+  const removedIds = collectSubtreeIds(rootId, nodesMap.value)
+  const newMap = new Map(nodesMap.value)
+  removedIds.forEach(id => newMap.delete(id))
+  nodesMap.value = newMap
+  removeNodeIdsFromUi(removedIds)
+}
+
+function applyWorkspaceNodeEvent(event: WorkspaceNodeEvent) {
+  if (
+    event.spaceId !== currentSpaceId.value
+    || !rememberWorkspaceEvent(event.eventId)
+  ) {
+    return
+  }
+
+  workspaceTreeEventVersion += 1
+
+  if (event.type === 'node.deleted') {
+    removeNodeSubtree(event.nodeId)
+    if (event.oldParent) {
+      const newMap = new Map(nodesMap.value)
+      mergeNodeIntoMap(newMap, event.oldParent)
+      nodesMap.value = newMap
+    }
+    syncOpenTabsFromNodes()
+    return
+  }
+
+  const newMap = new Map(nodesMap.value)
+  mergeNodeIntoMap(newMap, event.node)
+
+  if (event.type === 'node.created' && event.node.parent_id) {
+    const parent = newMap.get(event.node.parent_id)
+    if (parent) {
+      newMap.set(parent.id, { ...parent, has_children: true })
+    }
+  }
+  if (event.oldParent) mergeNodeIntoMap(newMap, event.oldParent)
+  if (event.newParent) mergeNodeIntoMap(newMap, event.newParent)
+
+  nodesMap.value = newMap
+  syncOpenTabsFromNodes()
+}
+
+async function fetchNodeScope(
+  spaceId: string,
+  parentId: string | null,
+): Promise<ApiNode[]> {
+  const parentQuery = parentId
+    ? `&parentId=${encodeURIComponent(parentId)}`
+    : ''
+  const res = await fetch(
+    `/api/nodes?spaceId=${encodeURIComponent(spaceId)}${parentQuery}`,
+    { headers: await authHeaders() },
+  )
+  if (!res.ok) {
+    throw new Error(`load node scope failed: ${res.status}`)
+  }
+  const json = await res.json()
+  return (json.data ?? []) as ApiNode[]
+}
+
+async function fetchNodeIfPresent(
+  spaceId: string,
+  nodeId: string,
+): Promise<ApiNode | null | undefined> {
+  try {
+    const res = await fetch(
+      `/api/nodes/${encodeURIComponent(nodeId)}?spaceId=${encodeURIComponent(spaceId)}`,
+      { headers: await authHeaders() },
+    )
+    if (res.status === 404) return null
+    if (!res.ok) return undefined
+    const json = await res.json()
+    return json.data as ApiNode | undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function reconcileNodeScopes(
+  spaceId: string,
+  parentIds: Array<string | null>,
+  retryOnConcurrentEvent = true,
+) {
+  const uniqueScopes = [...new Map(
+    parentIds.map(parentId => [parentId ?? '__root__', parentId]),
+  ).values()]
+  const eventVersionAtStart = workspaceTreeEventVersion
+  const snapshot = new Map(nodesMap.value)
+  const results = await Promise.all(
+    uniqueScopes.map(async parentId => ({
+      parentId,
+      nodes: await fetchNodeScope(spaceId, parentId),
+    })),
+  )
+
+  if (spaceId !== currentSpaceId.value) return
+  if (
+    retryOnConcurrentEvent
+    && eventVersionAtStart !== workspaceTreeEventVersion
+  ) {
+    await reconcileNodeScopes(spaceId, parentIds, false)
+    return
+  }
+
+  const missingIds = new Set<string>()
+  for (const { parentId, nodes } of results) {
+    const freshIds = new Set(nodes.map(node => node.id))
+    for (const current of snapshot.values()) {
+      if (current.parent_id === parentId && !freshIds.has(current.id)) {
+        missingIds.add(current.id)
+      }
+    }
+  }
+
+  const missingStates = new Map<string, ApiNode | null | undefined>()
+  await Promise.all([...missingIds].map(async (nodeId) => {
+    missingStates.set(nodeId, await fetchNodeIfPresent(spaceId, nodeId))
+  }))
+  if (spaceId !== currentSpaceId.value) return
+
+  const newMap = new Map(nodesMap.value)
+  const removedIds = new Set<string>()
+  for (const [nodeId, serverNode] of missingStates) {
+    if (serverNode === null) {
+      collectSubtreeIds(nodeId, newMap).forEach(id => removedIds.add(id))
+      continue
+    }
+    if (serverNode) mergeNodeIntoMap(newMap, serverNode)
+  }
+  removedIds.forEach(id => newMap.delete(id))
+
+  for (const { nodes } of results) {
+    nodes.forEach(node => mergeNodeIntoMap(newMap, node))
+  }
+
+  nodesMap.value = newMap
+  removeNodeIdsFromUi(removedIds)
+  syncOpenTabsFromNodes()
+}
+
+function disconnectWorkspaceEvents() {
+  workspaceEventsGeneration += 1
+  const connection = workspaceEventsConnection
+  workspaceEventsConnection = null
+  if (connection) {
+    void connection.disconnect().catch((error) => {
+      console.warn('Workspace event disconnect failed:', error)
+    })
+  }
+}
+
+function connectWorkspaceEventsForSpace(spaceId: string) {
+  disconnectWorkspaceEvents()
+  seenWorkspaceEventIds.clear()
+  if (!workspaceEventsEnabled()) return
+
+  const generation = workspaceEventsGeneration
+  workspaceEventsConnection = connectWorkspaceEvents({
+    spaceId,
+    getToken,
+    onEvent: (event) => {
+      if (
+        generation !== workspaceEventsGeneration
+        || currentSpaceId.value !== spaceId
+      ) {
+        return
+      }
+      applyWorkspaceNodeEvent(event)
+    },
+    onConnected: () => {
+      if (
+        generation !== workspaceEventsGeneration
+        || currentSpaceId.value !== spaceId
+      ) {
+        return
+      }
+      const scopes: Array<string | null> = [
+        null,
+        ...[...expanded.value].filter(id => nodesMap.value.has(id)),
+      ]
+      void reconcileNodeScopes(spaceId, scopes).catch((error) => {
+        console.error('Workspace tree resync failed:', error)
+      })
+    },
+    onError: (error) => {
+      if (generation === workspaceEventsGeneration) {
+        console.error('Workspace event socket error:', error)
+      }
+    },
+  })
+}
+
 async function createNode(placeholderName: string, parentIdOverride?: string) {
   // 父节点：右键指定 > 选中文件夹 > 根(顶部按钮显式传 null 时强制根)
   let parentId: string | null = parentIdOverride ?? null
@@ -414,15 +734,15 @@ const nodeService = {
     // 响应结构: data = { movedNode, oldParent, newParent } —— 后端保证 has_children 准确
     const payload = json.data ?? {}
     const newMap = new Map(nodesMap.value)
-    if (payload.movedNode) newMap.set(payload.movedNode.id, payload.movedNode)
-    if (payload.oldParent) newMap.set(payload.oldParent.id, payload.oldParent)
-    if (payload.newParent) newMap.set(payload.newParent.id, payload.newParent)
+    if (payload.movedNode) mergeNodeIntoMap(newMap, payload.movedNode)
+    if (payload.oldParent) mergeNodeIntoMap(newMap, payload.oldParent)
+    if (payload.newParent) mergeNodeIntoMap(newMap, payload.newParent)
     nodesMap.value = newMap
+    syncOpenTabsFromNodes()
   }
 }
 
 watch(selected, (nodeId: string | null) => {
-  isPreview.value = true
   loadingContent.value = true   // 保护:下面给 editContent 赋值不会触发 watch 误标 dirty
   if (nodeId) {
     const node = nodesMap.value.get(nodeId)
@@ -439,32 +759,26 @@ watch(selected, (nodeId: string | null) => {
 })
 
 async function loadChildren(parentId: string) {
-  if ([...nodesMap.value.values()].some(n => n.parent_id === parentId)) return
+  const spaceId = currentSpaceId.value
+  if (!spaceId) return
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}&parentId=${parentId}`, {
-      headers: await authHeaders(),
-    })
-    const json = await res.json()
-    const data: ApiNode[] = json.data ?? []
-    data.forEach(node => nodesMap.value.set(node.id, node))
+    await reconcileNodeScopes(spaceId, [parentId])
   } finally {
     loading.value = false
   }
 }
 
 async function loadRootNodes() {
+  const spaceId = currentSpaceId.value
+  if (!spaceId) return
   loading.value = true
   try {
-    const res = await fetch(`/api/nodes?spaceId=${currentSpaceId.value}`, {
-      headers: await authHeaders(),
-    })
-    const json = await res.json()
-    const data: ApiNode[] = json.data ?? []
-    nodesMap.value.clear()
+    const data = await fetchNodeScope(spaceId, null)
+    if (spaceId !== currentSpaceId.value) return
+    nodesMap.value = new Map(data.map(node => [node.id, node]))
     expanded.value.clear()
     selected.value = null
-    data.forEach(node => nodesMap.value.set(node.id, node))
   } finally {
     loading.value = false
   }
@@ -483,15 +797,32 @@ async function handleToggle(nodeId: string) {
 }
 
 function handleSelect(nodeId: string) {
+  const node = nodesMap.value.get(nodeId)
+  if (!node) return
+
+  // 文件夹只 toggle，不打开标签
+  if (node.type === 'collection') {
+    return
+  }
+
   // 切换前自动保存旧节点的 dirty 内容
   if (selected.value && selected.value !== nodeId) {
+    const latestContent = syncActiveEditorContent()
     const old = nodesMap.value.get(selected.value)
     if (old?.dirty) {
-      // ⚠️ 传当前 editContent(还是旧节点的内容,watch(selected) 还没跑)
-      saveNodeContent(selected.value, editContent.value, false)
+      void saveNodeContent(selected.value, latestContent, false)
     }
   }
-  selected.value = nodeId
+
+  openTab(nodeId)
+}
+
+async function saveActiveEditor(content: string) {
+  if (!selected.value) return
+  if (content !== editContent.value) {
+    editContent.value = content
+  }
+  await saveNodeContent(selected.value, content, true)
 }
 
 /**
@@ -645,24 +976,30 @@ async function deleteSpace(id: string) {
 }
 
 function enterSpace(id: string) {
+  disconnectWorkspaceEvents()
   currentSpaceId.value = id
   nodesMap.value.clear()
   expanded.value.clear()
   selected.value = null
-  isPreview.value = true
   editContent.value = ''
+  openTabs.value = []
   currentView.value = 'workspace'
-  nextTick(() => loadRootNodes())
+  nextTick(() => {
+    void loadRootNodes()
+    connectWorkspaceEventsForSpace(id)
+  })
 }
 
 async function backToSpaces() {
   // 离开前保存当前节点的 dirty 内容
   if (selected.value) {
+    const latestContent = syncActiveEditorContent()
     const node = nodesMap.value.get(selected.value)
     if (node?.dirty) {
-      await saveNodeContent(selected.value, editContent.value, false)
+      await saveNodeContent(selected.value, latestContent, false)
     }
   }
+  disconnectWorkspaceEvents()
   currentView.value = 'spaces'
   currentSpaceId.value = null
   nodesMap.value.clear()
@@ -672,6 +1009,7 @@ async function backToSpaces() {
 
 // init
 loadSpaces()
+onBeforeUnmount(disconnectWorkspaceEvents)
 
 type ContextMenu = {
   visible: boolean
@@ -778,8 +1116,9 @@ async function commitRename(targetId: string, newTitle: string) {
     const fresh = json.data as ApiNode | undefined
     if (!fresh) return
     const newMap = new Map(nodesMap.value)
-    newMap.set(targetId, fresh)
+    mergeNodeIntoMap(newMap, fresh)
     nodesMap.value = newMap
+    syncOpenTabsFromNodes()
   } catch (err) {
     console.error('rename error:', err)
   }
@@ -810,16 +1149,14 @@ async function deleteNode(targetId: string) {
     }
     const json = await res.json()
     const payload = json.data ?? {}
-    const newMap = new Map(nodesMap.value)
-    // 删本地节点
-    newMap.delete(targetId)
+    removeNodeSubtree(targetId)
     // 更新父节点的 has_children(后端响应里带)
     if (payload.oldParent) {
-      newMap.set(payload.oldParent.id, payload.oldParent)
+      const newMap = new Map(nodesMap.value)
+      mergeNodeIntoMap(newMap, payload.oldParent)
+      nodesMap.value = newMap
     }
-    // 如果删的是选中节点,清空选中
-    if (selected.value === targetId) selected.value = null
-    nodesMap.value = newMap
+    syncOpenTabsFromNodes()
   } catch (err) {
     console.error('delete error:', err)
   }
@@ -954,6 +1291,30 @@ async function duplicateNode(targetId: string) {
 
   <!-- ═══ Workspace 视图(现有) ═══ -->
   <main v-else-if="currentView === 'workspace'" class="workspace">
+    <!-- ═══ 标签栏(全宽) ═══ -->
+    <div v-if="openTabs.length" class="tabs-bar">
+      <div
+        v-for="tab in openTabs"
+        :key="tab.id"
+        class="tab-item"
+        :class="{ active: selected === tab.id }"
+        role="button"
+        tabindex="0"
+        @click="handleSelect(tab.id)"
+        @keydown.enter="handleSelect(tab.id)"
+        @keydown.space.prevent="handleSelect(tab.id)"
+      >
+        <span class="tab-icon">
+          <svg v-if="tab.type === 'image'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          <svg v-else-if="tab.type === 'video'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          <svg v-else-if="tab.type === 'audio'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </span>
+        <span class="tab-title">{{ tab.title }}</span>
+        <span v-if="nodesMap.get(tab.id)?.dirty" class="tab-dirty" title="未保存"></span>
+        <button type="button" class="tab-close" title="关闭" @click.stop="closeTab(tab.id)">×</button>
+      </div>
+    </div>
     <aside class="sidebar panel">
       <div class="panel-head">
         <div>
@@ -1016,36 +1377,34 @@ async function duplicateNode(targetId: string) {
 
       <section class="editor-grid">
         <article class="workspace-card editor-pane">
-          <div v-if="selected && (nodesMap.get(selected)?.type === 'image' || nodesMap.get(selected)?.type === 'video')" class="editor-content-only">
+          <div
+            v-if="selected && ['image', 'video', 'audio'].includes(nodesMap.get(selected)?.type || '')"
+            class="editor-content-only"
+          >
             <div v-if="nodesMap.get(selected)?.type === 'image'" class="preview-media image-preview">
               <img :src="getNodeSrc(selected)" alt="preview" />
             </div>
-            <div v-else class="preview-media video-preview">
+            <div v-else-if="nodesMap.get(selected)?.type === 'video'" class="preview-media video-preview">
               <video :src="getNodeSrc(selected)" controls playsinline />
             </div>
-          </div>
-          <template v-else-if="selected">
-            <div class="editor-toolbar">
-              <button type="button" class="mode-btn" :class="{ active: !isPreview }" @click="isPreview = false">Edit</button>
-              <button type="button" class="mode-btn" :class="{ active: isPreview }" @click="isPreview = true">Preview</button>
-              <button
-                type="button"
-                class="mode-btn save-btn"
-                :class="{ dirty: nodesMap.get(selected)?.dirty, saving: savingNow }"
-                :disabled="!nodesMap.get(selected)?.dirty || savingNow"
-                @click="saveNodeContent(selected, editContent, true)"
-              >{{ savingNow ? 'Saving…' : 'Save' }}</button>
+            <div v-else class="preview-media audio-preview">
+              <audio :src="getNodeSrc(selected)" controls />
             </div>
-            <textarea
-              v-if="!isPreview"
-              v-model="editContent"
-              class="editor-textarea"
-              placeholder="Write markdown here..."
-              @dragover.prevent="onEditorDragOver"
-              @drop="onEditorDrop"
-            ></textarea>
-            <div v-else class="text-editor" v-html="render(editContent)" @click="onPreviewClick"></div>
-          </template>
+          </div>
+          <CollaborativeEditor
+            v-else-if="selected"
+            :key="`${currentSpaceId}:${selected}`"
+            ref="editorRef"
+            v-model="editContent"
+            :space-id="currentSpaceId ?? ''"
+            :document-id="selected"
+            :dirty="Boolean(nodesMap.get(selected)?.dirty)"
+            :saving="savingNow"
+            :resolve-media="resolveEditorMedia"
+            @save="saveActiveEditor"
+            @navigate="onEditorNavigate"
+            @external-drop="onEditorDrop"
+          />
         </article>
       </section>
     </section>

@@ -1,7 +1,10 @@
 package com.workspace.service;
 
+import com.workspace.collaboration.NodeTreeEvent;
 import com.workspace.repository.NodeRepository;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -12,26 +15,38 @@ public class NodeService {
 
     private final NodeRepository nodeRepository;
     private final AuditService auditService;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public NodeService(NodeRepository nodeRepository, AuditService auditService) {
+    public NodeService(
+            NodeRepository nodeRepository,
+            AuditService auditService,
+            ApplicationEventPublisher eventPublisher
+    ) {
         this.nodeRepository = nodeRepository;
         this.auditService = auditService;
+        this.eventPublisher = eventPublisher;
     }
 
+    @Transactional
     public Map<String, Object> create(UUID spaceId, UUID parentId, String type, String title,
                                      String content, String properties, String caption,
                                      Double sortOrder, UUID createdBy) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        Map<String, Object> result = nodeRepository.insert(spaceId, parentId, type, title,
+        Map<String, Object> inserted = nodeRepository.insert(spaceId, parentId, type, title,
                 content, properties, caption, sortOrder, createdBy);
+        Map<String, Object> result = nodeRepository.findByIdWithHasChildren(
+                spaceId,
+                (UUID) inserted.get("id")
+        );
         auditService.log(spaceId, "node.create", "node", (UUID) result.get("id"),
                 "{\"type\":\"" + type + "\"}");
+        eventPublisher.publishEvent(NodeTreeEvent.created(spaceId, createdBy, result));
         return result;
     }
 
     public Map<String, Object> getById(UUID spaceId, UUID id) {
         RoleContext.requireAtLeast(Role.VIEWER);
-        return nodeRepository.findById(id);
+        return nodeRepository.findById(spaceId, id);
     }
 
     public java.util.List<Map<String, Object>> getAll() {
@@ -44,49 +59,124 @@ public class NodeService {
         return nodeRepository.findBySpaceIdAndParentId(spaceId, parentId);
     }
 
-    public Map<String, Object> update(UUID spaceId, UUID id, String title, String content, String properties,
-                                     String caption, Double sortOrder, UUID updatedBy) {
+    @Transactional
+    public Map<String, Object> update(
+            UUID spaceId,
+            UUID id,
+            String title,
+            String content,
+            String properties,
+            String caption,
+            Double sortOrder,
+            UUID updatedBy
+    ) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        int n = nodeRepository.update(id, title, content, properties, caption, sortOrder, updatedBy);
+        int n = nodeRepository.update(
+                spaceId,
+                id,
+                title,
+                content,
+                properties,
+                caption,
+                sortOrder,
+                updatedBy
+        );
         if (n == 0) return null;
-        Map<String, Object> fresh = nodeRepository.findById(id);
+        Map<String, Object> fresh = nodeRepository.findByIdWithHasChildren(spaceId, id);
         auditService.log(spaceId, "node.update", "node", id,
                 "{}");
+        eventPublisher.publishEvent(NodeTreeEvent.updated(spaceId, updatedBy, fresh));
         return fresh;
     }
 
-    public boolean delete(UUID spaceId, UUID id) {
+    @Transactional
+    public Map<String, Object> delete(UUID spaceId, UUID id) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        boolean deleted = nodeRepository.deleteById(id) > 0;
-        if (deleted) {
-            auditService.log(spaceId, "node.delete", "node", id,
-                    "{}");
+        Map<String, Object> before = nodeRepository.findById(spaceId, id);
+        if (before == null) return null;
+
+        UUID actorUserId = RoleContext.current().userId();
+        UUID oldParentId = (UUID) before.get("parent_id");
+        if (nodeRepository.deleteById(spaceId, id, actorUserId) == 0) {
+            return null;
         }
-        return deleted;
+
+        Map<String, Object> result = getDeleteResult(spaceId, id, oldParentId);
+        auditService.log(spaceId, "node.delete", "node", id, "{}");
+        eventPublisher.publishEvent(NodeTreeEvent.deleted(
+                spaceId,
+                actorUserId,
+                nodeFrom(result, "deletedNode"),
+                nodeFrom(result, "oldParent")
+        ));
+        return result;
     }
 
-    public boolean move(UUID spaceId, UUID nodeId, UUID newParentId, Double sortOrder, UUID updatedBy) {
+    @Transactional
+    public Map<String, Object> move(
+            UUID spaceId,
+            UUID nodeId,
+            UUID newParentId,
+            Double sortOrder,
+            UUID updatedBy
+    ) {
         RoleContext.requireAtLeast(Role.EDITOR);
-        boolean moved = nodeRepository.updateParentAndSort(nodeId, newParentId, sortOrder, updatedBy) > 0;
-        if (moved) {
-            auditService.log(spaceId, "node.move", "node", nodeId,
-                    "{\"spaceId\":\"" + spaceId + "\",\"newParentId\":\"" + newParentId + "\",\"sortOrder\":" + sortOrder + "}");
+        Map<String, Object> before = nodeRepository.findById(spaceId, nodeId);
+        if (before == null) return null;
+
+        UUID oldParentId = (UUID) before.get("parent_id");
+        int moved = nodeRepository.updateParentAndSort(
+                spaceId,
+                nodeId,
+                newParentId,
+                sortOrder,
+                updatedBy
+        );
+        if (moved == 0) {
+            return null;
         }
-        return moved;
+
+        Map<String, Object> result = getMoveResult(
+                spaceId,
+                nodeId,
+                oldParentId,
+                newParentId
+        );
+        auditService.log(spaceId, "node.move", "node", nodeId,
+                "{\"spaceId\":\"" + spaceId + "\",\"newParentId\":\"" + newParentId + "\",\"sortOrder\":" + sortOrder + "}");
+        eventPublisher.publishEvent(NodeTreeEvent.moved(
+                spaceId,
+                updatedBy,
+                nodeFrom(result, "movedNode"),
+                nodeFrom(result, "oldParent"),
+                nodeFrom(result, "newParent")
+        ));
+        return result;
     }
 
     /**
      * MOVE 后的连带查询:返回被移动节点 + 旧父 + 新父的最新状态(带现算 has_children)。
      * Controller 用这个构造 move 响应。
      */
-    public Map<String, Object> getMoveResult(UUID nodeId, UUID oldParentId, UUID newParentId) {
+    private Map<String, Object> getMoveResult(
+            UUID spaceId,
+            UUID nodeId,
+            UUID oldParentId,
+            UUID newParentId
+    ) {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("movedNode", nodeRepository.findByIdWithHasChildren(nodeId));
+        result.put("movedNode", nodeRepository.findByIdWithHasChildren(spaceId, nodeId));
         if (oldParentId != null) {
-            result.put("oldParent", nodeRepository.findByIdWithHasChildren(oldParentId));
+            result.put(
+                    "oldParent",
+                    nodeRepository.findByIdWithHasChildren(spaceId, oldParentId)
+            );
         }
         if (newParentId != null) {
-            result.put("newParent", nodeRepository.findByIdWithHasChildren(newParentId));
+            result.put(
+                    "newParent",
+                    nodeRepository.findByIdWithHasChildren(spaceId, newParentId)
+            );
         }
         return result;
     }
@@ -95,13 +185,31 @@ public class NodeService {
      * DELETE 后的连带查询:返回被删节点(标记 is_deleted=true)+ 旧父节点(带现算 has_children)。
      * Controller 用这个构造 delete 响应,让前端知道旧父的 has_children 是不是变了。
      */
-    public Map<String, Object> getDeleteResult(UUID nodeId, UUID oldParentId) {
+    private Map<String, Object> getDeleteResult(
+            UUID spaceId,
+            UUID nodeId,
+            UUID oldParentId
+    ) {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("deletedNode", nodeRepository.findByIdWithHasChildren(nodeId));
+        result.put(
+                "deletedNode",
+                nodeRepository.findByIdWithHasChildren(spaceId, nodeId)
+        );
         if (oldParentId != null) {
-            result.put("oldParent", nodeRepository.findByIdWithHasChildren(oldParentId));
+            result.put(
+                    "oldParent",
+                    nodeRepository.findByIdWithHasChildren(spaceId, oldParentId)
+            );
         }
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> nodeFrom(
+            Map<String, Object> result,
+            String key
+    ) {
+        return (Map<String, Object>) result.get(key);
     }
 
     /**

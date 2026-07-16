@@ -76,6 +76,14 @@ public class NodeRepository {
                 .fetchOne(r -> recordToMap(r));
     }
 
+    public Map<String, Object> findById(UUID spaceId, UUID id) {
+        return db.selectFrom(table("nodes"))
+                .where(field("id", UUID.class).eq(id))
+                .and(field("space_id", UUID.class).eq(spaceId))
+                .and(field("is_deleted", Boolean.class).eq(false))
+                .fetchOne(r -> recordToMap(r));
+    }
+
     /**
      * 按 id 查节点,带现算的 has_children。
      * 用于 MOVE/DELETE 后让前端拿到父节点最新状态。
@@ -86,7 +94,24 @@ public class NodeRepository {
             FROM nodes n
             WHERE n.id = ?
             """;
-        return db.fetchOne(sql, id) == null ? null : recordToMap(db.fetchOne(sql, id));
+        org.jooq.Record record = db.fetchOne(sql, id);
+        return record == null ? null : recordToMap(record);
+    }
+
+    public Map<String, Object> findByIdWithHasChildren(UUID spaceId, UUID id) {
+        String sql = """
+            SELECT n.*, EXISTS(
+                SELECT 1
+                FROM nodes n2
+                WHERE n2.parent_id = n.id
+                  AND n2.is_deleted = false
+            ) AS has_children
+            FROM nodes n
+            WHERE n.id = ?
+              AND n.space_id = ?
+            """;
+        org.jooq.Record record = db.fetchOne(sql, id, spaceId);
+        return record == null ? null : recordToMap(record);
     }
 
     public List<Map<String, Object>> findAll() {
@@ -131,6 +156,24 @@ public class NodeRepository {
                 .execute();
     }
 
+    public int update(UUID spaceId, UUID id, String title, String content, String properties,
+                      String caption, Double sortOrder, UUID updatedBy) {
+        return db.update(table("nodes"))
+                .set(field("title", String.class), title)
+                .set(field("content", SQLDataType.JSONB),
+                        content != null ? cast(content, SQLDataType.JSONB) : null)
+                .set(field("properties", SQLDataType.JSONB),
+                        properties != null ? cast(properties, SQLDataType.JSONB) : null)
+                .set(field("caption", String.class), caption)
+                .set(field("sort_order", Double.class), sortOrder)
+                .set(field("updated_by", UUID.class), updatedBy)
+                .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
+                .where(field("id", UUID.class).eq(id))
+                .and(field("space_id", UUID.class).eq(spaceId))
+                .and(field("is_deleted", Boolean.class).eq(false))
+                .execute();
+    }
+
     public int deleteById(UUID id) {
         return db.update(table("nodes"))
                 .set(field("is_deleted", Boolean.class), true)
@@ -139,11 +182,29 @@ public class NodeRepository {
                 .execute();
     }
 
+    public int deleteById(UUID spaceId, UUID id, UUID updatedBy) {
+        OffsetDateTime now = OffsetDateTime.now();
+        return db.update(table("nodes"))
+                .set(field("is_deleted", Boolean.class), true)
+                .set(field("deleted_at", OffsetDateTime.class), now)
+                .set(field("updated_at", OffsetDateTime.class), now)
+                .set(field("updated_by", UUID.class), updatedBy)
+                .where(field("id", UUID.class).eq(id))
+                .and(field("space_id", UUID.class).eq(spaceId))
+                .and(field("is_deleted", Boolean.class).eq(false))
+                .execute();
+    }
+
     public List<Map<String, Object>> findBySpaceIdAndParentId(UUID spaceId, UUID parentId) {
         String sql;
         if (parentId == null) {
             sql = """
-                SELECT n.*, EXISTS(SELECT 1 FROM nodes n2 WHERE n2.parent_id = n.id) AS has_children
+                SELECT n.*, EXISTS(
+                    SELECT 1
+                    FROM nodes n2
+                    WHERE n2.parent_id = n.id
+                      AND n2.is_deleted = false
+                ) AS has_children
                 FROM nodes n
                 WHERE n.space_id = ? AND n.parent_id IS NULL AND n.is_deleted = false
                 ORDER BY n.sort_order ASC
@@ -153,7 +214,12 @@ public class NodeRepository {
                     .collect(Collectors.toList());
         } else {
             sql = """
-                SELECT n.*, EXISTS(SELECT 1 FROM nodes n2 WHERE n2.parent_id = n.id) AS has_children
+                SELECT n.*, EXISTS(
+                    SELECT 1
+                    FROM nodes n2
+                    WHERE n2.parent_id = n.id
+                      AND n2.is_deleted = false
+                ) AS has_children
                 FROM nodes n
                 WHERE n.space_id = ? AND n.parent_id = ? AND n.is_deleted = false
                 ORDER BY n.sort_order ASC
@@ -171,6 +237,24 @@ public class NodeRepository {
                 .set(field("updated_by", UUID.class), updatedBy)
                 .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
                 .where(field("id", UUID.class).eq(id))
+                .execute();
+    }
+
+    public int updateParentAndSort(
+            UUID spaceId,
+            UUID id,
+            UUID newParentId,
+            Double sortOrder,
+            UUID updatedBy
+    ) {
+        return db.update(table("nodes"))
+                .set(field("parent_id", UUID.class), newParentId)
+                .set(field("sort_order", Double.class), sortOrder)
+                .set(field("updated_by", UUID.class), updatedBy)
+                .set(field("updated_at", OffsetDateTime.class), OffsetDateTime.now())
+                .where(field("id", UUID.class).eq(id))
+                .and(field("space_id", UUID.class).eq(spaceId))
+                .and(field("is_deleted", Boolean.class).eq(false))
                 .execute();
     }
 

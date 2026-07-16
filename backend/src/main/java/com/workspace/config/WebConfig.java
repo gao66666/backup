@@ -1,5 +1,6 @@
 package com.workspace.config;
 
+import com.workspace.service.CollaborationInternalAuthInterceptor;
 import com.workspace.service.SpaceAuthInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
@@ -24,9 +25,14 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class WebConfig implements WebMvcConfigurer {
 
     private final SpaceAuthInterceptor spaceAuthInterceptor;
+    private final CollaborationInternalAuthInterceptor collaborationInternalAuthInterceptor;
 
-    public WebConfig(SpaceAuthInterceptor spaceAuthInterceptor) {
+    public WebConfig(
+            SpaceAuthInterceptor spaceAuthInterceptor,
+            CollaborationInternalAuthInterceptor collaborationInternalAuthInterceptor
+    ) {
         this.spaceAuthInterceptor = spaceAuthInterceptor;
+        this.collaborationInternalAuthInterceptor = collaborationInternalAuthInterceptor;
     }
 
     @Override
@@ -37,5 +43,8 @@ public class WebConfig implements WebMvcConfigurer {
                     "/api/spaces/*",          // 单空间操作(getById/update/delete)
                     "/api/space-members/**"
                 );
+
+        registry.addInterceptor(collaborationInternalAuthInterceptor)
+                .addPathPatterns("/internal/collaboration/**");
     }
 }

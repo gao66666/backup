@@ -4,9 +4,22 @@
 module.exports = ({ method, body, query }) => {
   const { spaceId, parentId } = query
 
+  // 当前 dev server 会话内的节点状态。GET/POST/PUT 共享，用于测试编辑保存。
+  if (!globalThis.__wsNodesByKey) globalThis.__wsNodesByKey = new Map()
+  const nodeKey = (node) => `${node.space_id}:${node.id}`
+  const rememberNode = (node) => {
+    const key = nodeKey(node)
+    const remembered = globalThis.__wsNodesByKey.get(key)
+    const current = remembered ? { ...node, ...remembered } : node
+    globalThis.__wsNodesByKey.set(key, current)
+    return current
+  }
+
   // 跨请求持久化的新建节点（globalThis 不受 require cache 重置影响，重启 dev 才清空）
   if (!globalThis.__wsCreatedNodes) globalThis.__wsCreatedNodes = []
-  const createdForSpace = globalThis.__wsCreatedNodes.filter((n) => n.space_id === spaceId)
+  const createdForSpace = globalThis.__wsCreatedNodes
+    .filter((n) => n.space_id === spaceId)
+    .map(rememberNode)
 
   // ---- POST: 创建节点 ----
   if (method && method.toUpperCase() === 'POST') {
@@ -19,7 +32,8 @@ module.exports = ({ method, body, query }) => {
       type: body.type || 'doc',
       title: body.title || '未命名',
       content: body.content || '{}',
-      properties: '{}',
+      properties: body.properties || '{}',
+      caption: body.caption ?? null,
       description: '',
       sort_order: body.sortOrder ?? 1,
       is_deleted: false,
@@ -30,7 +44,7 @@ module.exports = ({ method, body, query }) => {
       has_children: false,
     }
     globalThis.__wsCreatedNodes.push(newNode)
-    return { data: newNode }
+    return { data: rememberNode(newNode) }
   }
 
   const rootNodes = [
@@ -203,7 +217,12 @@ module.exports = ({ method, body, query }) => {
     createdForSpace.filter((n) => (pid === null ? n.parent_id === null : n.parent_id === pid))
 
   if (!parentId) {
-    return { data: [...rootNodes, ...createdUnder(null)] }
+    return { data: [...rootNodes.map(rememberNode), ...createdUnder(null)] }
   }
-  return { data: [...(childNodes[parentId] || []), ...createdUnder(parentId)] }
+  return {
+    data: [
+      ...(childNodes[parentId] || []).map(rememberNode),
+      ...createdUnder(parentId),
+    ],
+  }
 }

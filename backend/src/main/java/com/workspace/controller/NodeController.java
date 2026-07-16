@@ -104,17 +104,9 @@ public class NodeController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(@PathVariable UUID id) {
         UUID spaceId = RoleContext.current().spaceId();
-
-        // 拿旧 parent_id 和节点状态(因为 delete 内部要查一次,这里手动查以拿)
-        java.util.Map<String, Object> before = nodeService.getById(spaceId, id);
-        if (before == null) return ResponseEntity.notFound().build();
-        UUID parentId = (UUID) before.get("parent_id");
-
-        boolean deleted = nodeService.delete(spaceId, id);
-        if (!deleted) return ResponseEntity.notFound().build();
-
-        // 返回 deletedNode + oldParent(带现算 has_children),让前端更新父节点最新状态
-        return ResponseEntity.ok(ApiResponse.ok(nodeService.getDeleteResult(id, parentId)));
+        Map<String, Object> result = nodeService.delete(spaceId, id);
+        if (result == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 
     @PatchMapping("/{id}/move")
@@ -123,16 +115,14 @@ public class NodeController {
         UUID newParentId = body.get("newParentId") != null ? UUID.fromString((String) body.get("newParentId")) : null;
         Double sortOrder = body.get("sortOrder") != null ? ((Number) body.get("sortOrder")).doubleValue() : null;
 
-        // 先查旧 parent(因为 move 内部也要查一次,这里手动查以拿旧 parent_id)
-        java.util.Map<String, Object> before = nodeService.getById(spaceId, id);
-        if (before == null) return ResponseEntity.notFound().build();
-        UUID oldParentId = (UUID) before.get("parent_id");
-
-        boolean moved = nodeService.move(spaceId, id, newParentId, sortOrder, authService.getCurrentUserId());
-        if (!moved) return ResponseEntity.notFound().build();
-
-        // 返回 movedNode + oldParent + newParent,让前端一次性更新三处 has_children
-        return ResponseEntity.ok(ApiResponse.ok(
-                nodeService.getMoveResult(id, oldParentId, newParentId)));
+        Map<String, Object> result = nodeService.move(
+                spaceId,
+                id,
+                newParentId,
+                sortOrder,
+                authService.getCurrentUserId()
+        );
+        if (result == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(ApiResponse.ok(result));
     }
 }
