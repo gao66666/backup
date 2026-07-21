@@ -56,6 +56,8 @@ import {
 } from 'y-prosemirror'
 import { Doc } from 'yjs'
 
+import { createMdxPlugins } from '../editor/mdx'
+
 import '@milkdown/kit/prose/view/style/prosemirror.css'
 import '@milkdown/kit/prose/gapcursor/style/gapcursor.css'
 import '@milkdown/kit/prose/tables/style/tables.css'
@@ -75,6 +77,8 @@ type SlashCommandId =
   | 'audio'
   | 'table'
   | 'divider'
+  | 'callout'
+  | 'mdx-component'
 
 type SlashCommandOption = {
   id: SlashCommandId
@@ -107,6 +111,8 @@ const slashCommands: SlashCommandOption[] = [
   { id: 'audio', label: '音频', description: '通过地址插入音频', icon: '♪' },
   { id: 'table', label: '表格', description: '插入 3 × 3 表格', icon: '▦' },
   { id: 'divider', label: '分隔线', description: '插入水平分隔线', icon: '—' },
+  { id: 'callout', label: 'MDX 提示块', description: '插入可编辑的 Callout 组件', icon: 'ⓘ' },
+  { id: 'mdx-component', label: 'MDX 组件', description: '插入自定义 JSX 组件', icon: '<>' },
 ]
 
 const collaborationColors = [
@@ -351,7 +357,7 @@ const mediaHtmlView = $view(
       dom.className = `milkdown-html-node milkdown-html-node--${tagName}`
       media.controls = true
       media.preload = 'metadata'
-      if (tagName === 'video') {
+      if (media instanceof HTMLVideoElement) {
         media.playsInline = true
       }
 
@@ -379,14 +385,14 @@ const mediaHtmlView = $view(
   },
 )
 
-function getMarkdown(): string {
+function getMdx(): string {
   return editor?.action(readMarkdown()) ?? props.modelValue
 }
 
-function publishMarkdown(): string {
-  const markdown = getMarkdown()
-  if (markdown !== props.modelValue) emit('update:modelValue', markdown)
-  return markdown
+function publishMdx(): string {
+  const mdx = getMdx()
+  if (mdx !== props.modelValue) emit('update:modelValue', mdx)
+  return mdx
 }
 
 function focus() {
@@ -398,7 +404,7 @@ function focus() {
 function runCommand<T>(key: CmdKey<T>, payload?: T) {
   if (!editor || !ready.value) return
   editor.action(callCommand(key, payload))
-  publishMarkdown()
+  publishMdx()
   focus()
 }
 
@@ -414,7 +420,7 @@ function runCollaborationHistory(command: typeof collaborationUndoCommand) {
     )
     view.focus()
   })
-  publishMarkdown()
+  publishMdx()
 }
 
 function consumeSlashTrigger(): boolean {
@@ -459,7 +465,7 @@ function requestSlashMedia(type: 'image' | 'video' | 'audio') {
     return
   }
 
-  insertMarkdown(`<${type} src="${src}" controls></${type}>`, true)
+  insertMdx(`<${type} src="${src}" controls></${type}>`, true)
 }
 
 function executeSlashCommand(command: SlashCommandOption) {
@@ -501,6 +507,18 @@ function executeSlashCommand(command: SlashCommandOption) {
     case 'divider':
       runCommand(insertHrCommand.key)
       break
+    case 'callout':
+      insertMdx('<Callout type="info" title="提示">\n\n请输入内容。\n\n</Callout>')
+      break
+    case 'mdx-component': {
+      const name = window.prompt('组件名称（例如 Chart）')?.trim()
+      if (!name || !/^[A-Z][\w.:-]*$/.test(name)) {
+        focus()
+        break
+      }
+      insertMdx(`<${name} />`)
+      break
+    }
   }
 }
 
@@ -533,13 +551,13 @@ function requestImage() {
 }
 
 function save() {
-  emit('save', publishMarkdown())
+  emit('save', publishMdx())
 }
 
-function insertMarkdown(markdown: string, inline = false) {
+function insertMdx(mdx: string, inline = false) {
   if (!editor || !ready.value) return
-  editor.action(insertMarkdownContent(markdown, inline))
-  publishMarkdown()
+  editor.action(insertMarkdownContent(mdx, inline))
+  publishMdx()
   focus()
 }
 
@@ -743,6 +761,7 @@ onMounted(async () => {
       }))
     })
     .use(commonmark)
+    .use(createMdxPlugins(resolveMediaURL))
     .use(listener)
     .use(collab)
     .use(indent)
@@ -804,8 +823,8 @@ onBeforeUnmount(() => {
 
 defineExpose({
   focus,
-  getMarkdown,
-  insertMarkdown,
+  getMdx,
+  insertMdx,
 })
 </script>
 
@@ -817,7 +836,7 @@ defineExpose({
     @drop.capture="handleDrop"
     @keydown.capture="handleKeydown"
   >
-    <div class="collaborative-editor__toolbar" role="toolbar" aria-label="Markdown formatting">
+    <div class="collaborative-editor__toolbar" role="toolbar" aria-label="MDX formatting">
       <div class="editor-tool-group">
         <button type="button" class="editor-tool-btn" title="撤销" :disabled="!ready" @mousedown.prevent="runCollaborationHistory(collaborationUndoCommand)">↶</button>
         <button type="button" class="editor-tool-btn" title="重做" :disabled="!ready" @mousedown.prevent="runCollaborationHistory(collaborationRedoCommand)">↷</button>
